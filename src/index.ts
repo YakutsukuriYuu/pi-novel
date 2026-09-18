@@ -559,8 +559,14 @@ Call this at most once, only when the work is genuinely ready and the author has
             `需要搬迁：${plan.moves.length} 份文档`,
             `种类改名：${plan.kindRenames} 处（plan → chapter-plan）`,
             `来源改绑编号：${plan.sourceRewrites} 份文档`,
+            plan.leftAlone.length
+              ? `\n不在迁移范围、保持原位：${plan.leftAlone.length} 份（如 AGENTS.md 和你自己的笔记）\n${plan.leftAlone.slice(0, 8).map(f => `- ${f}`).join('\n')}${plan.leftAlone.length > 8 ? `\n- …另有 ${plan.leftAlone.length - 8} 份` : ''}`
+              : '',
+            plan.unregistered.length
+              ? `\n没有 frontmatter、会原样搬过去：${plan.unregistered.length} 份\n${plan.unregistered.slice(0, 8).map(f => `- ${f}`).join('\n')}\n（搬完后可以用「收编」把它们纳入管理）`
+              : '',
             plan.blockers.length ? `\n阻塞项：\n${plan.blockers.map(b => `- ${b}`).join('\n')}` : '\n没有阻塞项。',
-          ];
+          ].filter(Boolean);
           if (plan.blockers.length) { show(lines.join('\n')); return; }
           if (!ctx.hasUI) throw new Error('迁移需要交互确认，请在交互模式下使用。');
           if (!await ctx.ui.confirm('迁移项目格式', '会重写全部文档路径与来源绑定。请确认已经提交或备份整个目录。继续？')) return;

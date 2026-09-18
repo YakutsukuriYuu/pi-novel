@@ -123,6 +123,36 @@ test('迁移遇到无法解析的来源时拒绝执行，不猜也不静默丢�
   assert.equal(decode(await fs.readFile(path.join(root, '.novel/project.md'), 'utf8')).meta.format, 1);
 });
 
+test('AGENTS.md 和作者的笔记不阻塞迁移；受管目录里的裸 md 原样搬过去', async t => {
+  const { root } = await legacyProject(t);
+  // 插件自己在 format 1 建的基础设施文件：故意没有 frontmatter。
+  // 早先的实现把它当成「损坏的受管文档」，于是一整本书都迁不了。
+  await fs.writeFile(path.join(root, 'AGENTS.md'), '# 小说项目\n\n使用 pi-novel 的 novel_* 工具管理本书。\n');
+  // 作者随手写的笔记（根级，本来就不归迁移管）
+  await fs.writeFile(path.join(root, '随手记.md'), '雨天的感觉。\n');
+  // 作者放在受管目录里、但没写 frontmatter 的笔记
+  await fs.mkdir(path.join(root, 'lore/characters'), { recursive: true });
+  await fs.writeFile(path.join(root, 'lore/characters/老张.md'), '老张是个铁匠。\n');
+
+  const plan = await planMigration(root);
+  assert.deepEqual(plan.blockers, [], '这些都不该阻塞迁移');
+  assert.deepEqual([...plan.leftAlone].sort(), ['AGENTS.md', '随手记.md']);
+  assert.deepEqual(plan.unregistered, ['lore/characters/老张.md']);
+
+  await migrate(root);
+
+  // 不在迁移范围的文件一字未动
+  assert.match(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), /pi-novel/);
+  assert.equal(await fs.readFile(path.join(root, '随手记.md'), 'utf8'), '雨天的感觉。\n');
+  // 裸笔记跟着换位置，但内容一字未改 —— 补编号是作者用 novel_adopt 决定的事
+  assert.equal(await fs.readFile(path.join(root, '人物/老张.md'), 'utf8'), '老张是个铁匠。\n');
+  await assert.rejects(fs.access(path.join(root, 'lore/characters/老张.md')));
+
+  // 迁移后它们都被如实报为「还没纳入管理」，而不是静默消失。
+  // 根目录的随手记也在列 —— unmanaged 报的是全部未受管 markdown，两者都可以收编。
+  assert.deepEqual([...(await new Project(root).unmanaged())].sort(), ['人物/老张.md', '随手记.md'].sort());
+});
+
 test('已经在 format 2 的项目不会被重复迁移', async t => {
   const { root } = await legacyProject(t);
   await migrate(root);
