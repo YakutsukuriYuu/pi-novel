@@ -87,7 +87,9 @@ export async function commit(root: string, changes: Change[], title: string, opt
   }
   const id = `${Date.now()}-${randomUUID()}`;
   const journal = `.novel/pending/${id}.md`;
-  const meta = { id, kind: 'transaction', title, status: 'pending', changes };
+  // 权限随事务走：迁移需要删除位于旧目录的文件，那些路径按新规则已不受管。
+  // 把标记写进 journal，这样恢复时不必依赖调用方记得传参，也防止普通事务意外获得这个权限。
+  const meta = { id, kind: 'transaction', title, status: 'pending', ...(options.allowUnmanaged ? { allowUnmanaged: true } : {}), changes };
   await atomic(root, journal, encode(meta, '# Change transaction\n\nExact Markdown snapshots are stored above. Do not edit this journal.'));
   // Re-check immediately before each write; partial failure deliberately leaves a recoverable journal.
   for (const c of changes) {
@@ -111,9 +113,12 @@ export async function rollback(root: string, id: string): Promise<void> {
   if (!['pending', 'committed'].includes(meta.status) && !(pendingText && meta.status === 'rolled-back')) throw new Error('Transaction already recovered');
   const changes = meta.changes as Change[];
   if (!Array.isArray(changes) || !changes.length) throw new Error('Invalid transaction');
+  // 只有当初被明确授权的事务才能回写到不受管路径（迁移用）。
+  // 路径穿越仍然由 safePath 拦着（readOptional/atomic 都会调它）。
+  const relaxPaths = meta.allowUnmanaged === true;
   const targets = new Set<string>();
   for (const c of changes) {
-    if (!c || typeof c.path !== 'string' || !contentPath(c.path) || (c.before !== null && typeof c.before !== 'string') || (c.after !== null && typeof c.after !== 'string')) throw new Error('Invalid transaction target/snapshot');
+    if (!c || typeof c.path !== 'string' || (!relaxPaths && !contentPath(c.path)) || (c.before !== null && typeof c.before !== 'string') || (c.after !== null && typeof c.after !== 'string')) throw new Error('Invalid transaction target/snapshot');
     if (targets.has(c.path.toLowerCase())) throw new Error('Duplicate transaction target');
     targets.add(c.path.toLowerCase());
     const now = await readOptional(root, c.path);

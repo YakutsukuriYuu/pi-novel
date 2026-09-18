@@ -156,7 +156,9 @@ async function readLegacyDocs(root: string): Promise<{ docs: LegacyDoc[]; proble
     const raw = await readOptional(root, old);
     if (raw === null) continue;
     try {
-      const parsed = decode(raw);
+      // legacySources：format 1 的 sources 用 path，而当前校验器要求 id。
+      // 用严格模式读旧文件会直接把迁移自己的输入判成非法。
+      const parsed = decode(raw, { legacySources: true });
       docs.push({ old, meta: parsed.meta, body: parsed.body, raw });
     } catch (error) {
       problems.push(`${old} 无法解析：${String(error)}`);

@@ -51,35 +51,58 @@ function optionalStringArray(value: unknown, field: string): void {
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) throw new Error(`Invalid ${field}`);
 }
 
-export function decode(text: string): { meta: Meta; body: string } {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const SHA256 = /^[a-f0-9]{64}$/;
+
+export interface DecodeOptions {
+  /**
+   * 接受 format 1 的 `sources: [{ path, revision }]`。
+   *
+   * **仅供迁移读取旧文件时使用。** 校验器不能拿来读它自己要迁移的数据，
+   * 否则迁移读不进自己的输入 —— 这个坑真的踩过。默认仍然严格。
+   */
+  legacySources?: boolean;
+}
+
+function checkSources(sources: unknown, legacy: boolean): void {
+  if (sources === undefined) return;
+  if (!Array.isArray(sources)) throw new Error('Invalid sources');
+  for (const item of sources) {
+    if (!isRecord(item)) throw new Error('Invalid sources');
+    if (typeof item.revision !== 'string' || !SHA256.test(item.revision)) {
+      throw new Error('Invalid sources: revision 必须是 sha256');
+    }
+    if (typeof item.id === 'string' && item.id.trim()) continue;
+    if (legacy && typeof item.path === 'string' && item.path) continue;
+    throw new Error('Invalid sources: 每一项都需要稳定 id（不是路径）');
+  }
+}
+
+export function decode(text: string, options: DecodeOptions = {}): { meta: Meta; body: string } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!match) throw new Error('Missing Markdown YAML frontmatter');
   const doc = parseDocument(match[1]);
   if (doc.errors.length) throw new Error(doc.errors.map((e) => e.message).join('; '));
   const value = doc.toJS({ maxAliasCount: 10 });
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid metadata');
+  if (!isRecord(value)) throw new Error('Invalid metadata');
 
   for (const key of ['id', 'kind', 'title', 'status']) requireString(value[key], key);
 
-  if (value.sources !== undefined) {
-    if (!Array.isArray(value.sources)) throw new Error('Invalid sources');
-    for (const source of value.sources as Source[]) {
-      if (!source || typeof source.id !== 'string' || !source.id.trim()) {
-        throw new Error('Invalid sources: 每一项都需要稳定 id（不是路径）');
-      }
-      if (typeof source.revision !== 'string' || !/^[a-f0-9]{64}$/.test(source.revision)) {
-        throw new Error('Invalid sources: revision 必须是 sha256');
-      }
-    }
-  }
+  checkSources(value.sources, options.legacySources === true);
   optionalStringArray(value.refs, 'refs');
   optionalStringArray(value.aliases, 'aliases');
   optionalStringArray(value.tags, 'tags');
-  if (value.order !== undefined && (!Number.isSafeInteger(value.order) || value.order < 1)) throw new Error('Invalid chapter order');
-  if (value.approvedRevision !== undefined && (typeof value.approvedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(value.approvedRevision))) {
+  const order = value.order;
+  if (order !== undefined && (typeof order !== 'number' || !Number.isSafeInteger(order) || order < 1)) {
+    throw new Error('Invalid chapter order');
+  }
+  if (value.approvedRevision !== undefined && (typeof value.approvedRevision !== 'string' || !SHA256.test(value.approvedRevision))) {
     throw new Error('Invalid approvedRevision');
   }
-  if (value.canonicalBodyHash !== undefined && (typeof value.canonicalBodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.canonicalBodyHash))) {
+  if (value.canonicalBodyHash !== undefined && (typeof value.canonicalBodyHash !== 'string' || !SHA256.test(value.canonicalBodyHash))) {
     throw new Error('Invalid canonicalBodyHash');
   }
 
