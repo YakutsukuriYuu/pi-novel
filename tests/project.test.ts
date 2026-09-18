@@ -455,6 +455,32 @@ test('a legacy filename with link characters is still readable but reported', as
   assert.ok((await p.diagnostics()).some((x) => x.includes('Obsidian 链接特殊字符')));
 });
 
+test('作者手改进来的状态值如果对该种类无效，会被报出来', async t => {
+  const p = await fixture(t);
+  const c = await written(p);
+  const file = path.join(p.root, c.path);
+  const raw = await fs.readFile(file, 'utf8');
+
+  // 章节只允许 draft / accepted / published。
+  // 作者很可能会写成 confirmed（设定类用的就是它），而以前这会被静默忽略：
+  // 文件看着改了，状态栏却什么也不动。
+  await fs.writeFile(file, raw.replace('status: draft', 'status: confirmed'));
+  const reported = (await p.diagnostics()).find((i) => i.includes('状态「'));
+  assert.ok(reported, '非法状态必须被报出来');
+  assert.match(reported, /confirmed/);
+  assert.match(reported, /draft \/ accepted \/ published/);
+
+  // 合法值不该被报
+  await fs.writeFile(file, raw.replace('status: draft', 'status: accepted'));
+  assert.ok(!(await p.diagnostics()).some((i) => i.includes('状态「')));
+
+  // 导出快照是工具自己写的，它有专属状态值，不能被当成非法
+  await p.transition(c.path, 'reopen', (await p.read(c.path)).revision);
+  await p.transition(c.path, 'accept', (await p.read(c.path)).revision);
+  await p.exportBook();
+  assert.ok(!(await p.diagnostics()).some((i) => i.includes('状态「')), 'snapshot 应当合法');
+});
+
 test('reorder migrates chapter folders to readable names and keeps summaries valid', async t => {
   const p = await fixture(t);
   const a = await written(p, '雨夜'); const b = await written(p, '天明');

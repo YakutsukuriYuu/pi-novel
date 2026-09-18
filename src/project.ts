@@ -24,6 +24,7 @@ import {
   kinds,
   labelOf,
   parseChapterFolder,
+  statusesOf,
   templateNameOf,
 } from './kinds.ts';
 
@@ -520,6 +521,12 @@ export class Project {
         status = action === 'accept' ? 'accepted' : 'published';
       }
 
+      // 单一来源：合法状态集合声明在 kinds.ts，diagnostics 也用它。
+      // 两边各写一份必然漂移。
+      if (!statusesOf(doc.meta.kind).includes(status)) {
+        throw new Error(`${labelOf(doc.meta.kind)} 不允许状态 ${status}`);
+      }
+
       const after = encode({ ...doc.meta, status, canonicalBodyHash: protectedStates.has(status) ? hash(doc.body) : undefined, ...(approvedRevision ? { approvedRevision } : {}) }, doc.body);
       const changes: Change[] = [{ path: name, before: doc.raw, after }];
       // 状态变更不改正文：在同一事务里把指向该精确版本的派生资料重绑，避免它们无故过期。
@@ -642,11 +649,17 @@ export class Project {
       if (protectedStates.has(d.meta.status) && d.meta.canonicalBodyHash !== hash(d.body)) {
         issues.push(`受保护内容被外部改动：${d.path}；请 reopen 后重新确认/采纳`);
       }
-      // 种类被废弃后留下的文件。不报的话它们会一直静静地待在目录里、
-      // 在 catalog 里以未知种类出现，而没人知道该拿它们怎么办。
-      if (!isKind(d.meta.kind)) {
-        issues.push(`种类已废弃（${d.meta.kind}）：${d.path}；可以删除它，或换个 kind 继续用`);
-      }
+        // 种类被废弃后留下的文件。不报的话它们会一直静静地待在目录里、
+        // 在 catalog 里以未知种类出现，而没人知道该拿它们怎么办。
+        if (!isKind(d.meta.kind)) {
+          issues.push(`种类已废弃（${d.meta.kind}）：${d.path}；可以删除它，或换个 kind 继续用`);
+        } else if (!statusesOf(d.meta.kind).includes(d.meta.status)) {
+          // 作者手改 frontmatter 时最容易踩的坑：写了个对该种类无效的状态值。
+          // 不报的话，文件看着改了，插件却什么也不会做 —— 而没有任何提示。
+          issues.push(
+            `状态「${d.meta.status}」对${labelOf(d.meta.kind)}无效：${d.path}；它只能是 ${statusesOf(d.meta.kind).join(' / ')}`,
+          );
+        }
       if (ids.has(d.meta.id)) issues.push(`编号重复：${d.meta.id}`);
       ids.add(d.meta.id);
       if (paths.has(d.path.toLowerCase())) issues.push(`路径大小写冲突：${d.path}`);

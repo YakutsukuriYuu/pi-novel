@@ -21,7 +21,7 @@ import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, type NovelConfig } from 
  * `recover`、`approve` 这些已经不存在的命令 —— 文档漂移不会让测试变红，
  * 报错信息进错指令更难发现。
  */
-export const COMMANDS = ['init', 'close', 'help'] as const;
+export const COMMANDS = ['init', 'refresh', 'close', 'help'] as const;
 
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
@@ -40,6 +40,7 @@ const help = `# pi-novel
 前端用 Obsidian 读写，Pi 负责生成。所有内容都是普通 Markdown。
 
 /novel init [书名] — 在当前文件夹激活（允许非空目录）
+/novel refresh — 重算状态栏（快捷键 alt+r）
 /novel close — 关闭本会话的管理保护
 
 其余全部直接和模型说就行：
@@ -105,14 +106,31 @@ export default function novelExtension(pi: ExtensionAPI) {
     }
   };
 
-  const refresh = async (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) return;
-    if (!active) { ctx.ui.setStatus('pi-novel', undefined); return; }
+  /**
+   * 重算状态栏，并返回一句可展示的总结。
+   *
+   * 它**每次都是读盘现算**：拿每章正文的 status 重新数，只有 accepted / published 进分子，
+   * 分母是全部章节。所以作者在 Obsidian 里手改 frontmatter，重算一次就能看到新值。
+   *
+   * 真正的问题是**什么时候**重算：原先只在会话开始和每轮对话结束时算，
+   * 而作者改文件不会产生任何 pi 事件，于是状态栏一直显示旧值。
+   * 这就是下面 refresh 命令与 alt+r 快捷键存在的原因。
+   */
+  const refresh = async (ctx: ExtensionContext): Promise<string> => {
+    if (!active) {
+      if (ctx.hasUI) ctx.ui.setStatus('pi-novel', undefined);
+      return '当前目录不是小说项目，没有状态可刷新。';
+    }
     try {
       const chapters = await active.chapters();
-      const done = chapters.filter((d) => !d.canonicalChanged && ['accepted', 'published'].includes(d.meta.status)).length;
-      ctx.ui.setStatus('pi-novel', `小说 ${done}/${chapters.length} 章已接受`);
-    } catch { ctx.ui.setStatus('pi-novel', '小说 · 需要检查'); }
+      const accepted = chapters.filter((d) => !d.canonicalChanged && ['accepted', 'published'].includes(d.meta.status)).length;
+      if (ctx.hasUI) ctx.ui.setStatus('pi-novel', `小说 ${accepted}/${chapters.length} 章已接受`);
+      const rest = chapters.length - accepted;
+      return `已接受 ${accepted}/${chapters.length} 章${rest ? `，还有 ${rest} 章未采纳` : '，全部完成'}。`;
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.setStatus('pi-novel', '小说 · 需要检查');
+      return `状态算不出来：${(error as Error).message}`;
+    }
   };
 
   // Built-in writes are blocked while active. This queue additionally coordinates project tools.
@@ -213,6 +231,14 @@ Rules:
   });
 
   pi.on('agent_end', async (_e, ctx) => { await refresh(ctx); });
+
+  // 作者会在 Obsidian 里改 md，而改文件不会产生任何 pi 事件，
+  // 所以状态栏需要一个手动入口。快捷键是顺手的方式；
+  // 命令保留是因为快捷键不写在任何地方，不好发现。
+  pi.registerShortcut('alt+r', {
+    description: 'pi-novel：重算状态栏',
+    handler: async (ctx) => { await refresh(ctx); },
+  });
 
   // ── 只读工具 ────────────────────────────────────────────────────────
 
@@ -579,6 +605,11 @@ Call this at most once, only when the work is genuinely ready and the author has
             '\n接下来直接和模型说「我们立项吧」就行。第一个要定的是文风。',
           ].filter(Boolean).join('\n'));
           await refresh(ctx);
+          return;
+        }
+
+        if (command === 'refresh') {
+          show(await refresh(ctx));
           return;
         }
 

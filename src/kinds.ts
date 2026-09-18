@@ -11,6 +11,13 @@
  *    而且改它会让所有存量小说的 frontmatter 失效。中文名放在 `label` 里用于展示。
  */
 
+/** 只允许停留在草稿的种类。 */
+export const DRAFT_ONLY: readonly string[] = ['draft'];
+/** 可由作者确认的种类。 */
+export const CONFIRMABLE_STATES: readonly string[] = ['draft', 'confirmed'];
+/** 章节正文。 */
+export const CHAPTER_STATES: readonly string[] = ['draft', 'accepted', 'published'];
+
 export interface KindDef {
   /** frontmatter 的 kind 值，机器标识，英文。 */
   kind: string;
@@ -29,6 +36,14 @@ export interface KindDef {
    * 这类文档有刻意冻结的来源版本，让它们能被自由创建会破坏诊断的可信度。
    */
   generated?: boolean;
+  /**
+   * 该种类允许的状态。省略时按其他标记推导：
+   * confirmable → draft/confirmed，其余 → 只有 draft。
+   *
+   * 它存在的原因：作者会直接改 frontmatter，而一个对该种类无效的状态值
+   * （例如给章节写 confirmed）以前会被静默忽略——文件看着改了，实际什么也没发生。
+   */
+  statuses?: readonly string[];
   /** 模板文件名，默认与 kind 同名。 */
   template?: string;
 }
@@ -68,7 +83,7 @@ export const KINDS: readonly KindDef[] = [
   // ── 章节两件套 ───────────────────────────────────────────────────
   // 方案必须先被作者批准，正文才允许写入（见 Project.write）。
   { kind: 'chapter-plan', label: '章节方案', folder: '章节', template: 'chapter-plan', confirmable: true },
-  { kind: 'chapter', label: '章节正文', folder: '章节' },
+  { kind: 'chapter', label: '章节正文', folder: '章节', statuses: CHAPTER_STATES },
 
   // ── 追踪：随时间变化的事实 ────────────────────────────────────────
   { kind: 'state', label: '人物状态', folder: '当前状态/人物', derived: true },
@@ -85,7 +100,7 @@ export const KINDS: readonly KindDef[] = [
   { kind: 'idea', label: '灵感', folder: '灵感' },
   { kind: 'research', label: '考据', folder: '灵感/考据' },
   { kind: 'proposal', label: '提案', folder: '提案' },
-  { kind: 'export', label: '导出', folder: '导出', generated: true },
+  { kind: 'export', label: '导出', folder: '导出', generated: true, statuses: ['snapshot'] },
 
   // ── 根级 ─────────────────────────────────────────────────────────
   { kind: 'creator', label: '创作约定', folder: '', template: 'creator' },
@@ -97,6 +112,18 @@ export function kindDef(kind: string): KindDef {
   const found = BY_KIND.get(kind);
   if (!found) throw new Error(`未知种类：${kind}；可用：${KINDS.map((k) => k.kind).join(', ')}`);
   return found;
+}
+
+/**
+ * 某个种类允许的状态。
+ *
+ * 单一来源：`transition()` 用它校验状态变更，`diagnostics()` 用它报出
+ * 作者手改进来的非法状态。两边各写一份必然漂移。
+ */
+export function statusesOf(kind: string): readonly string[] {
+  const def = kindDef(kind);
+  if (def.statuses) return def.statuses;
+  return def.confirmable ? CONFIRMABLE_STATES : DRAFT_ONLY;
 }
 
 export function isKind(kind: string): boolean {

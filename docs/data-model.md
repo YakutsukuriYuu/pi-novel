@@ -80,12 +80,25 @@ sources: []
 `location` `faction` `item` `concept` `character` `relationship` `volume` `arc`
 `chapter-plan` `emotion` `timeline`
 
-**派生资料**（5 种，只有 `draft`，且必须带 `sources`）：
+**派生资料**（4 种，只有 `draft`，且必须带 `sources`）：
 `relationship-state` `state` `event` `review`
-
+  
 **其余**：`chapter`（走 accept/publish）、`thread` `idea` `research` `proposal` `creator`
-（保留草稿）、`export`（工具生成，不接受直接创建）。
-
+（保留草稿）、`export`（工具生成，状态为 `snapshot`，不接受直接创建）。
+  
+### 状态写错会被报出来
+  
+每个种类只接受特定状态（声明在 `src/kinds.ts`，`transition()` 与 `diagnostics()` 共用同一份）。
+作者手改 frontmatter 时很容易写成别的种类的值 ——
+最常见的错是给章节写 `confirmed`（那是设定类用的）。
+  
+这种错以前会被**静默忽略**：文件看着改了，状态栏和采纳流程却什么也不动。
+现在 `novel_check` 会报：
+  
+```text
+状态「confirmed」对章节正文无效：章节/0001-雨夜/正文.md；它只能是 draft / accepted / published
+```
+  
 `accepted` / `published` / `confirmed` 的内容**拒绝任何正文写入**，必须先 `reopen`。
 
 ## 章节两件套
