@@ -82,6 +82,17 @@ description: 使用 pi-novel 管理长期小说项目：立项、设定、人物
 | `novel_recover` | 撤销某次修改（弹确认框） |
 | `novel_export` | 导出已采纳章节 |
 
+## 只读工具的范围
+
+`read` / `grep` / `find` / `ls` / `ffgrep` / `fffind` 都被限制在**本书目录之内**。
+读兄弟目录里的东西（`../别的书/…`、绝对路径、`~/…`）会被拦下。
+
+被拦时**不要绕路** —— 不要换个写法重试、不要用别的工具兜。直接告诉作者：
+他可以在 `~/.pi/agent/pi-novel.json` 里设 `"allowReadOutsideProject": true`，
+或临时 `/novel close`。
+
+`web_search` / `web_fetch` 不受此限制，它们按 URL 工作。
+
 ## 作者手写的文件
 
 他会直接在 Obsidian 里写笔记。`novel_check` 的 `unmanaged` 字段就是这些文件。

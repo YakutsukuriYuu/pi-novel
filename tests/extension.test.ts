@@ -143,6 +143,11 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
   assert.equal(status.founding[0].label, '文风');
   assert.equal(status.chapters[0].plan, 'approved');
   assert.deepEqual(status.unmanaged, ['随手记.md']);
+  // 当前生效的安全边界要能自查，否则「以为加了工具其实没生效」很难查
+  assert.equal(status.toolAccess.readOutsideProject, false);
+  assert.ok(status.toolAccess.builtinReadonly.includes('ffgrep'));
+  assert.deepEqual(status.toolAccess.extraAllowed, []);
+  assert.equal(status.toolAccess.configProblem, null);
 
   // 历史可用于撤销
   assert.match(await call('novel_history', {}), /\.novel\/transactions\//);
@@ -156,6 +161,25 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
     }
     assert.ok(blocked, name);
   }
+
+  // 只读边界要真的接在钩子上，不能只是 access.ts 里一个没人调的函数。
+  const blockedRead = async (name: string, input: Record<string, unknown>): Promise<boolean> => {
+    for (const hook of guards) {
+      const value = await hook({ type: 'tool_call', toolName: name, toolCallId: 'x', input }, ctx) as { block?: boolean } | undefined;
+      if (value?.block === true) return true;
+    }
+    return false;
+  };
+  assert.ok(await blockedRead('read', { path: '../别的书/人物/林默.md' }), '越界读必须被拦');
+  assert.ok(await blockedRead('ffgrep', { path: '/etc', pattern: 'x' }), '绝对路径越界也要拦');
+  assert.ok(!(await blockedRead('read', { path: '章节/0001-雨夜/正文.md' })), '项目内读应放行');
+  assert.ok(!(await blockedRead('ffgrep', { path: '**/*.md', pattern: 'x' })), 'glob 不该误伤');
+  assert.ok(!(await blockedRead('web_search', { query: 'x' })), '按 URL 的工具不做路径检查');
+  // 新放行的只读工具确实进了白名单
+  for (const name of ['ffgrep', 'fffind', 'web_search', 'web_fetch']) {
+    assert.ok(!(await blockedRead(name, { path: '人物/林默.md', query: 'x' })), `${name} 应放行`);
+  }
+
   assert.equal((await new Project(book).chapters()).length, 1);
 });
 

@@ -8,6 +8,8 @@ import { Project, adoptDocument, initProject, kinds, labelOf } from './project.t
 import { decode } from './markdown.ts';
 import { FOUNDING, PLAN_FILE } from './kinds.ts';
 import { locked, projectAbove, projectAt, readOptional, rollback, transactionFiles } from './storage.ts';
+import { READ_PATH_TOOLS, allowedTool, escapesProject, pathArgument, readOnlyTools } from './access.ts';
+import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, type NovelConfig } from './config.ts';
 
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
@@ -44,30 +46,18 @@ export function output(text: string) {
   };
 }
 
-// Guard is deliberately allowlist-based: unknown tool implementations may write via arbitrary APIs.
-export const readOnlyTools = new Set(['read', 'grep', 'find', 'ls']);
-
-export const NOVEL_TOOLS = [
-  // 只读
-  'novel_check', 'novel_catalog', 'novel_read', 'novel_context', 'novel_history',
-  // 写作
-  'novel_create', 'novel_new_chapter', 'novel_propose', 'novel_write',
-  'novel_patch', 'novel_rename', 'novel_summary',
-  // 作者授权（弹确认框）
-  'novel_authorize',
-  // 维护
-  'novel_adopt', 'novel_reorder', 'novel_recover', 'novel_export',
-] as const;
-
-export function allowedTool(name: string): boolean {
-  return readOnlyTools.has(name) || (NOVEL_TOOLS as readonly string[]).includes(name);
-}
+// 工具准入与只读边界都在 access.ts —— 那是插件唯一的安全边界，单独成模块才好测。
+// 这里重新导出，保持插件对外面的工具面不变。
+export { NOVEL_TOOLS, allowedTool, readOnlyTools } from './access.ts';
 
 /** 作者取消时的固定回话，避免模型换个说法反复问。 */
 const DECLINED = '作者取消了这次操作。不要重试，也不要换一种说法再问 —— 等他明确要求。';
 
 export default function novelExtension(pi: ExtensionAPI) {
   let active: Project | undefined;
+  /** 来自 ~/.pi/agent/pi-novel.json。每个会话开始读一次，改配置需重开会话。 */
+  let config: NovelConfig = { ...DEFAULT_CONFIG };
+  let configProblem: string | null = null;
 
   const need = async (): Promise<Project> => {
     if (!active) throw new Error('没有打开的小说。请在小说文件夹里用 /novel init 激活，或从该目录启动 Pi。');
@@ -123,6 +113,10 @@ export default function novelExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     active = undefined;
+    // 配置每个会话读一次：改完重开才生效，可预测比热加载重要。
+    const loaded = await loadConfig();
+    config = loaded.config;
+    configProblem = loaded.problem;
     // 只有当前目录本身算小说根，不向上找。
     const root = await projectAt(ctx.cwd);
     // 看到标记文件就进入受管模式，**即使项目本身有问题**。
@@ -135,12 +129,28 @@ export default function novelExtension(pi: ExtensionAPI) {
       const above = await projectAbove(ctx.cwd).catch(() => undefined);
       if (above) ctx.ui.notify(`当前目录不是小说根（${above} 才是）。子目录不会激活小说模式，文件也不受保护；请在小说根目录启动 Pi。`, 'warning');
     }
+    // 配置写错了会让「以为加了工具其实没生效」很难查，所以明确报出来。
+    if (configProblem && ctx.hasUI) {
+      ctx.ui.notify(`${defaultConfigPath()} 有问题：${configProblem}；已按默认值继续。`, 'warning');
+    }
     await refresh(ctx);
   });
 
   pi.on('tool_call', async event => {
-    if (active && !allowedTool(event.toolName)) {
+    if (!active) return;
+    // 默认拒绝：不在白名单里的一律拦下。名单在 access.ts，附上了为什么不能改成黑名单的实测依据。
+    if (!allowedTool(event.toolName, config.additionalAllowedTools)) {
       return { block: true, reason: 'pi-novel managed session: use novel_* tools. Arbitrary shell/write/edit/other extension tools are blocked. The author can /novel close to leave managed mode.' };
+    }
+    // 只读工具不许读到项目外面。能读不能写，但越界读兄弟目录仍然不该默认放行。
+    if (!config.allowReadOutsideProject && READ_PATH_TOOLS.has(event.toolName)) {
+      const candidate = pathArgument(event.input);
+      if (candidate !== null && await escapesProject(active.root, candidate)) {
+        return {
+          block: true,
+          reason: `只读工具不能访问项目之外的路径：${candidate}。若确实需要，请作者在 ${defaultConfigPath()} 里设 "allowReadOutsideProject": true（或 /novel close 后再读）。`,
+        };
+      }
     }
   });
 
@@ -291,6 +301,14 @@ Rules:
         chapters,
         // 作者手写但还没纳入管理的笔记。对话里说「我写了个东西」时先看这里。
         unmanaged,
+        // 当前生效的安全边界。作者随时能确认自己加的额外工具到底生效了没。
+        toolAccess: {
+          builtinReadonly: [...readOnlyTools],
+          extraAllowed: config.additionalAllowedTools,
+          readOutsideProject: config.allowReadOutsideProject,
+          configPath: defaultConfigPath(),
+          configProblem,
+        },
       }, null, 2));
     },
   });
