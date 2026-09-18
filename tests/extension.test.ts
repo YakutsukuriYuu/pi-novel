@@ -56,6 +56,16 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
     return text.text;
   };
 
+  // 会弹确认框的工具**必须**串行执行。
+  //
+  // pi 默认把一条消息里的多个工具调用并行执行，而模型很自然地会想
+  // 「一次确认立项五件套」—— 发 5 个 novel_authorize。若它们并行跑，
+  // 5 个阻塞式确认框会让界面永久挂起，连一个 toolResult 都返回不了（真踩过）。
+  // 只要同批里有一个标了 sequential，agent-loop 就会让整批串行。
+  for (const name of ['novel_authorize', 'novel_adopt', 'novel_reorder', 'novel_recover']) {
+    assert.equal(tool(name).executionMode, 'sequential', `${name} 必须串行，否则并发确认框会卡死界面`);
+  }
+
   // 建章会同时生成 方案/正文/摘要 三份
   const chapter = JSON.parse(await call('novel_new_chapter', { title: '雨夜' })) as { id: string; path: string; folder: string };
   assert.equal(chapter.path, '章节/0001-雨夜/正文.md');
@@ -149,8 +159,7 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
   assert.equal((await new Project(book).chapters()).length, 1);
 });
 
-test('the extension exposes exactly the intended tool surface', () => {
-  // 工具白名单必须和 SKILL.md 里列的一致
+test('会弹确认框的工具都标了串行执行，且白名单与 SKILL.md 一致', () => {
   assert.deepEqual([...NOVEL_TOOLS].sort(), [
     'novel_adopt', 'novel_authorize', 'novel_catalog', 'novel_check', 'novel_context',
     'novel_create', 'novel_export', 'novel_history', 'novel_new_chapter', 'novel_patch',

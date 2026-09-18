@@ -83,10 +83,24 @@ export default function novelExtension(pi: ExtensionAPI) {
    * 这是本次改造的关键：过去采纳/确认只能是命令，模型连「请求」都做不到；
    * 现在模型可以发起请求，但**必须由作者在终端上点确认框**才会执行。
    * 授权仍然只在作者手里，而作者不必再输命令、也不必记住文件路径。
+   *
+   * `confirming` 是第二道防线。pi 默认把一条消息里的多个工具调用**并行**执行，
+   * 而并发的 confirm 会把界面卡死 —— 真踩过：模型想一次确认立项五件套，
+   * 发了 5 个 novel_authorize，然后全部挂住、连一个 toolResult 都没返回。
+   * `executionMode: 'sequential'` 已经让它们排队，这里再栗一道。
    */
+  let confirming = false;
   const askAuthor = async (ctx: ExtensionContext, title: string, message: string): Promise<boolean> => {
     if (!ctx.hasUI) throw new Error('这一步需要作者确认，请在交互模式下操作。');
-    return ctx.ui.confirm(title, message);
+    if (confirming) {
+      throw new Error('已有一个确认框在等待作者处理。一次只请求一件事，等这一项有结果了再问下一项。');
+    }
+    confirming = true;
+    try {
+      return await ctx.ui.confirm(title, message);
+    } finally {
+      confirming = false;
+    }
   };
 
   const refresh = async (ctx: ExtensionContext) => {
@@ -409,6 +423,8 @@ Use this only after discussing the plan with the author in conversation and bein
 
   pi.registerTool({
     name: 'novel_authorize', label: '请求作者授权',
+    // 必须串行：确认框是阻塞式的，并行弹多个会把界面卡死。
+    executionMode: 'sequential',
     description: `Ask the AUTHOR to approve a protected state change. This is the only way canon changes state, and it always shows a confirmation dialog the author answers — you cannot approve anything yourself.
 
 action:
@@ -444,6 +460,8 @@ Call this at most once, only when the work is genuinely ready and the author has
 
   pi.registerTool({
     name: 'novel_adopt', label: '收编作者的笔记',
+    // 必须串行：会弹确认框。
+    executionMode: 'sequential',
     description: 'Bring a Markdown file the author wrote (no frontmatter yet) under management: add frontmatter, assign a stable ID, and move it into the canonical folder for its kind if it is outside the managed areas. Asks the author to confirm because it rewrites their file.',
     parameters: Type.Object({
       path: Type.String(),
@@ -464,6 +482,8 @@ Call this at most once, only when the work is genuinely ready and the author has
 
   pi.registerTool({
     name: 'novel_reorder', label: '调整章节顺序',
+    // 必须串行：会弹确认框。
+    executionMode: 'sequential',
     description: 'Reorder chapters. Provide every chapter ID exactly once, in the desired order (get IDs from novel_check or novel_catalog). Renames chapter folders, so it asks the author to confirm.',
     parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1 }) }),
     async execute(_id, args, signal, _onUpdate, ctx) {
@@ -478,6 +498,8 @@ Call this at most once, only when the work is genuinely ready and the author has
 
   pi.registerTool({
     name: 'novel_recover', label: '撤销一次修改',
+    // 必须串行：会弹确认框。
+    executionMode: 'sequential',
     description: 'Roll back a transaction, restoring every file to its exact previous content. Omit id to roll back the most recent one. Refuses if later or external edits would be clobbered. Asks the author to confirm.',
     parameters: Type.Object({ id: Type.Optional(Type.String()) }),
     async execute(_id, args, signal, _onUpdate, ctx) {
