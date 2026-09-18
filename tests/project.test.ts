@@ -112,10 +112,12 @@ test('external changes invalidate sources; IDs survive reorder; export is Markdo
   await assert.rejects(p.write(exported.path, snapshot.revision, '覆盖快照'), /Protected/);
   await p.reorder([b.id, a.id]);
   assert.equal((await p.chapters())[0].meta.id, b.id);
+  const aAfter = await p.chapter(a.id);
+  assert.match(aAfter.path, /0002-一\/text\.md$/, 'reorder renames folders to readable NNNN-title');
+  assert.ok(!(await p.diagnostics()).some(x => x.includes('Stale')), 'reorder rebinds sources to moved paths');
+  await fs.appendFile(path.join(p.root, aAfter.path), '\n外部编辑。\n');
   assert.ok((await p.diagnostics()).some(x => x.includes('Stale')));
-  await assert.rejects(p.exportBook(), /Stale chapter summary/);
-  await fs.appendFile(path.join(p.root, a.path), '\n外部编辑。\n');
-  assert.ok((await p.diagnostics()).some(x => x.includes('Stale')));
+  await assert.rejects(p.exportBook(), /Stale chapter summary|changed externally/);
 });
 
 test('rollback restores exact content and refuses to clobber newer author edits', async t => {
@@ -234,3 +236,48 @@ test('orphan atomic temporary files are not interpreted as transactions or conte
   assert.equal((await pending(p.root)).length, 0);
   await p.newChapter('恢复后');
 });
+
+test('filenames are human-readable titles with dedup and cross-platform sanitizing', async t => {
+  const p = await fixture(t);
+  const a = await p.create('character', '林默');
+  assert.equal(a.path, 'lore/characters/林默.md');
+  const b = await p.create('character', '林默');
+  assert.equal(b.path, 'lore/characters/林默-2.md', 'duplicate titles get a numeric suffix');
+  const c = await p.create('character', '林 默: <秘密>?');
+  assert.match(c.path, /^lore\/characters\/林-默.*\.md$/);
+  await p.read(c.path);
+  const reserved = await p.create('character', 'CON');
+  assert.ok(!/^lore\/characters\/con\.md$/i.test(reserved.path), 'Windows reserved names must not be used verbatim');
+  const chapter = await p.newChapter('第一章 雨夜');
+  assert.equal(chapter.path, 'chapters/0001-第一章-雨夜/text.md');
+  await assert.rejects(p.read('lore/characters/林默 .md'), /Not found/);
+});
+
+test('reorder migrates chapter folders to readable names and keeps summaries valid', async t => {
+  const p = await fixture(t);
+  const a = await written(p, '雨夜'); const b = await written(p, '天明');
+  await p.transition(a.path, 'accept', a.doc.revision);
+  await p.reorder([b.id, a.id]);
+  const aNow = await p.chapter(a.id); const bNow = await p.chapter(b.id);
+  assert.equal(aNow.path, 'chapters/0002-雨夜/text.md');
+  assert.equal(bNow.path, 'chapters/0001-天明/text.md');
+  assert.equal(aNow.meta.order, 2); assert.equal(bNow.meta.order, 1);
+  const summary = await p.read(aNow.path.replace(/text\.md$/, 'summary.md'));
+  assert.deepEqual(summary.meta.sources, [{ path: aNow.path, revision: aNow.revision }], 'summary follows the moved chapter');
+  assert.equal((await p.diagnostics()).length, 0);
+  // identity survives; the accepted chapter still exports
+  assert.equal(aNow.meta.id, a.id);
+  await p.exportBook();
+});
+
+test('reorder tolerates duplicate chapter titles without folder collisions', async t => {
+  const p = await fixture(t);
+  const a = await written(p, '同一标题'); const b = await written(p, '同一标题');
+  assert.notEqual(folderOfPath(a.path), folderOfPath(b.path));
+  await p.reorder([b.id, a.id]);
+  const aNow = await p.chapter(a.id); const bNow = await p.chapter(b.id);
+  assert.match(aNow.path, /^chapters\/0002-同一标题/); assert.match(bNow.path, /^chapters\/0001-同一标题/);
+  assert.equal((await p.diagnostics()).length, 0);
+});
+
+function folderOfPath(p: string) { return p.split('/').slice(0, -1).join('/'); }

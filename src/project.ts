@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { decode, encode, hash, type Meta, type Source } from './markdown.ts';
 import { commit, contentPath, locked, pending, readOptional, safePath, type Change } from './storage.ts';
+import { slugify, uniquePath } from './naming.ts';
+
+const folderOf = (p: string) => p.split('/').slice(0, -1).join('/');
+const chapterFolder = (order: number, title: string) => `chapters/${String(order).padStart(4, '0')}-${slugify(title)}`;
 
 export const kinds: Record<string, string> = {
   character: 'lore/characters', location: 'lore/locations', faction: 'lore/factions',
@@ -117,7 +121,8 @@ export class Project {
       await this.checkLinks(refs, sources);
       if (derivedKinds.has(kind) && !sources.length) throw new Error('Derived records require source revisions');
       const id = `${kind}-${randomUUID()}`;
-      const name = `${kinds[kind]}/${id}.md`;
+      // Filename is derived from the title for humans; the UUID in frontmatter is the identity.
+      const name = await uniquePath(this.root, kinds[kind], slugify(title));
       const after = encode({ id, kind, title, status: 'draft', refs, sources }, await template(kind, title));
       return { path: name, transaction: await commit(this.root, [{ path: name, before: null, after }], `Create ${kind}`) };
     });
@@ -127,10 +132,11 @@ export class Project {
     return this.mutate(async () => {
       const list = await this.chapters();
       const id = `ch-${randomUUID()}`;
-      const folder = `chapters/${id}`;
+      const order = list.length ? Math.max(...list.map(d => d.meta.order!)) + 1 : 1;
+      const folder = chapterFolder(order, title);
       const changes: Change[] = [];
       for (const [file, kind] of [['text', 'chapter'], ['plan', 'plan']]) {
-        changes.push({ path: `${folder}/${file}.md`, before: null, after: encode({ id: file === 'text' ? id : `${id}-plan`, kind, title, status: 'draft', ...(file === 'text' ? { order: list.length + 1 } : { refs: [id] }) }, await template(kind, title)) });
+        changes.push({ path: `${folder}/${file}.md`, before: null, after: encode({ id: file === 'text' ? id : `${id}-plan`, kind, title, status: 'draft', ...(file === 'text' ? { order } : { refs: [id] }) }, await template(kind, title)) });
       }
       return { id, path: `${folder}/text.md`, transaction: await commit(this.root, changes, 'Create chapter and plan') };
     });
@@ -219,11 +225,63 @@ export class Project {
     return this.mutate(async () => {
       const chapters = await this.chapters();
       if (ids.length !== chapters.length || new Set(ids).size !== ids.length || ids.some(id => !chapters.some(d => d.meta.id === id))) throw new Error('Supply every chapter ID exactly once');
-      const changes = await Promise.all(ids.map(async (id, i) => {
-        const d = chapters.find(c => c.meta.id === id)!;
-        return { path: d.path, before: d.raw, after: encode({ ...d.meta, order: i + 1 }, d.body) };
-      }));
-      return commit(this.root, changes.filter(c => c.before !== c.after), 'Reorder chapters; recheck continuity');
+      const byId = new Map(chapters.map(c => [c.meta.id, c]));
+      const currentFolders = new Set(chapters.map(c => folderOf(c.path).toLowerCase()));
+
+      // 1. Target folder per chapter: NNNN-title. Duplicate titles may collide with a folder
+      //    another chapter still occupies during this transaction; suffix those targets.
+      const targetFolder = new Map<string, string>();
+      for (let i = 0; i < ids.length; i++) {
+        const d = byId.get(ids[i])!;
+        let folder = chapterFolder(i + 1, d.meta.title);
+        let n = 2;
+        while (currentFolders.has(folder.toLowerCase()) && folderOf(d.path).toLowerCase() !== folder.toLowerCase()) folder = `${chapterFolder(i + 1, d.meta.title)}-${n++}`;
+        targetFolder.set(d.meta.id, folder);
+      }
+
+      // 2. Move every Markdown file in each chapter folder; only text.md content changes (order).
+      interface Move { newPath: string; originalRaw: string; baseRaw: string }
+      const moves = new Map<string, Move>();
+      for (let i = 0; i < ids.length; i++) {
+        const d = byId.get(ids[i])!;
+        const oldFolder = folderOf(d.path);
+        const newFolder = targetFolder.get(d.meta.id)!;
+        const files = (await fs.readdir(await safePath(this.root, oldFolder))).filter(f => f.endsWith('.md'));
+        for (const file of files) {
+          const oldPath = `${oldFolder}/${file}`;
+          const newPath = `${newFolder}/${file}`;
+          const originalRaw = (await readOptional(this.root, oldPath))!;
+          if (newPath === oldPath && (file !== 'text.md' || d.meta.order === i + 1)) continue;
+          const baseRaw = file === 'text.md' ? encode({ ...decode(originalRaw).meta, order: i + 1 }, decode(originalRaw).body) : originalRaw;
+          moves.set(oldPath, { newPath, originalRaw, baseRaw });
+        }
+      }
+      if (!moves.size) throw new Error('No changes');
+
+      // 3. Rebind sources inside moved files (summary.md points at text.md), then in all
+      //    unmoved documents. Moved sources keep pointing at the same logical content.
+      const firstPass = new Map([...moves].map(([oldPath, m]) => [oldPath, { newPath: m.newPath, revision: hash(m.baseRaw) }]));
+      const finalRaw = new Map<string, string>();
+      for (const m of moves.values()) {
+        const parsed = decode(m.baseRaw);
+        if (parsed.meta.sources?.some(s => firstPass.has(s.path))) {
+          parsed.meta.sources = parsed.meta.sources.map(s => firstPass.has(s.path) ? { path: firstPass.get(s.path)!.newPath, revision: firstPass.get(s.path)!.revision } : s);
+          finalRaw.set(m.newPath, encode(parsed.meta, parsed.body));
+        } else finalRaw.set(m.newPath, m.baseRaw);
+      }
+      const finalLookup = new Map([...moves].map(([oldPath, m]) => [oldPath, { newPath: m.newPath, revision: hash(finalRaw.get(m.newPath)!) }]));
+
+      const changes: Change[] = [];
+      for (const [oldPath, m] of moves) {
+        changes.push({ path: oldPath, before: m.originalRaw, after: null });
+        changes.push({ path: m.newPath, before: null, after: finalRaw.get(m.newPath)! });
+      }
+      for (const d of await this.documents()) {
+        if (moves.has(d.path) || !d.meta.sources?.some(s => finalLookup.has(s.path))) continue;
+        const sources = d.meta.sources.map(s => finalLookup.has(s.path) ? { path: finalLookup.get(s.path)!.newPath, revision: finalLookup.get(s.path)!.revision } : s);
+        changes.push({ path: d.path, before: d.raw, after: encode({ ...d.meta, sources }, d.body) });
+      }
+      return commit(this.root, changes, 'Reorder chapters; folders renamed, sources rebound; recheck continuity');
     });
   }
   async diagnostics(): Promise<string[]> {
@@ -245,7 +303,8 @@ export class Project {
         if (!docs.some(s => s.path === d.path.replace(/text\.md$/, 'summary.md'))) issues.push(`Missing summary: ${d.path}`);
       }
       for (const ref of d.meta.refs ?? []) if (!docs.some(other => other.meta.id === ref)) issues.push(`Broken reference ${ref}: ${d.path}`);
-      for (const source of d.meta.sources ?? []) if (!docs.some(other => other.path === source.path && other.revision === source.revision)) issues.push(`Stale/missing source ${source.path}: ${d.path}`);
+      // Export snapshots intentionally freeze past paths/revisions; they are history, not drift.
+      if (d.meta.kind !== 'export') for (const source of d.meta.sources ?? []) if (!docs.some(other => other.path === source.path && other.revision === source.revision)) issues.push(`Stale/missing source ${source.path}: ${d.path}`);
       if (derivedKinds.has(d.meta.kind) && !d.meta.sources?.length) issues.push(`Missing sources: ${d.path}`);
     }
     for (const p of await pending(this.root)) issues.push(`Unfinished transaction: ${p}`);
@@ -272,7 +331,10 @@ export class Project {
         const summary = await this.read(chapter.path.replace(/text\.md$/, 'summary.md'));
         if (!summary.meta.sources?.some(s => s.path === chapter.path && s.revision === chapter.revision)) throw new Error(`Stale chapter summary: ${chapter.path}; reconcile before export`);
       }
-      const name = `exports/book-${randomUUID()}.md`;
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+      const title = decode((await readOptional(this.root, '.novel/project.md'))!).meta.title;
+      const name = await uniquePath(this.root, 'exports', `${slugify(title)}-${stamp}`);
       const after = encode({ id: randomUUID(), kind: 'export', title: '小说正文', status: 'snapshot', sources: chapters.map(c => ({ path: c.path, revision: c.revision })) }, chapters.map(c => c.body).join('\n\n---\n\n'));
       return { path: name, transaction: await commit(this.root, [{ path: name, before: null, after }], 'Export accepted prose') };
     });

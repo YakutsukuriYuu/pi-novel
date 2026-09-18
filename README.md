@@ -42,13 +42,13 @@ pi install git:github.com/YakutsukuriYuu/pi-novel
 /novel review 检查《雨夜》的时间线、人物知识边界和世界规则。
 ```
 
-插件自动分配稳定 ID 和路径。你可按标题与模型沟通，不必手写 UUID。`/novel status` 显示章节路径。
+插件自动分配稳定 ID 和**可读路径**（如 `lore/characters/林默.md`、`chapters/0001-雨夜/`）。你可按标题与模型沟通，不必记路径。`/novel status` 显示章节路径。
 
-审阅后，由你执行：
+审阅后，由你执行（路径照 `/novel status` 的输出）：
 
 ```text
-/novel accept chapters/ch-实际ID/text.md
-/novel confirm lore/characters/character-实际ID.md
+/novel accept chapters/0001-雨夜/text.md
+/novel confirm lore/characters/林默.md
 ```
 
 命令还会弹出确认。模型没有接受正文或确认设定的工具。`accept` 要求非空正文和与当前版本一致的事实摘要。
@@ -106,7 +106,7 @@ Skill 随包一起安装。`/novel write|polish|review|plan` 显式加载内置 
 │   ├── factions/*.md                 # 势力
 │   ├── items/*.md                    # 物品与限制
 │   └── concepts/*.md                 # 其他重要概念
-├── chapters/ch-稳定ID/
+├── chapters/0001-第一章-标题/
 │   ├── plan.md                       # 计划：打算发生什么
 │   ├── text.md                       # 当前唯一正文
 │   └── summary.md                    # 事实：实际写了什么
