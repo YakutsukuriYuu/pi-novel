@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Project, initProject, kinds } from '../src/project.ts';
-import { discover, safePath, locked, rollback, commit, pending, readOptional, transactionFiles } from '../src/storage.ts';
+import { projectAbove, projectAt, safePath, locked, rollback, commit, pending, readOptional, transactionFiles } from '../src/storage.ts';
 import { decode, encode, hash } from '../src/markdown.ts';
 
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
@@ -44,10 +44,12 @@ async function written(p: Project, title = '雨夜') {
   return { ...c, doc: await p.read(c.path) };
 }
 
-test('initialization activates any folder, is Markdown only, discoverable from descendants', async t => {
+test('initialization activates any folder, is Markdown only, and only that folder is the root', async t => {
   const p = await fixture(t);
   await p.validate();
-  assert.equal(await discover(path.join(p.root, '设定')), p.root);
+  // 一个目录就是一本书：本目录算根，子目录不算
+  assert.equal(await projectAt(p.root), p.root);
+  assert.equal(await projectAt(path.join(p.root, '设定')), undefined, '子目录不激活父项目');
   // 创作约定 + 立项五件套
   assert.equal((await p.documents()).length, 6);
   // 对已经激活的项目再 init 应当明确拒绝，而不是要求空目录。
@@ -61,6 +63,35 @@ test('initialization activates any folder, is Markdown only, discoverable from d
     }
   };
   await walk(p.root);
+});
+
+test('一个目录就是一本书：父目录的标记不会让子目录被激活', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-novel-nested-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const outer = (await initProject(path.join(dir, 'A'), '外书')).root;
+  const innerB = path.join(outer, 'B');
+  await fs.mkdir(innerB, { recursive: true });
+
+  assert.equal(await projectAt(outer), outer);
+  // B 还没初始化：即使 A 是小说，B 也不被激活。
+  // 这正是取消上溯要解决的问题 —— 否则 B 会默默变成 A 的一部分。
+  assert.equal(await projectAt(innerB), undefined);
+  // 提示用的上溯仍看得到 A，但它**不参与激活**，只用来提醒用户开错目录了。
+  assert.equal(await projectAbove(innerB), outer);
+  assert.equal(await projectAbove(outer), undefined, 'A 自己不再往上找');
+
+  // B 自己初始化之后，两本书互相独立
+  const bookB = (await initProject(innerB, 'B书')).root;
+  assert.equal(await projectAt(bookB), bookB);
+  assert.equal(await projectAt(outer), outer);
+
+  const bTitles = (await new Project(bookB).documents()).map((d) => d.meta.title);
+  assert.ok(bTitles.includes('B书'), 'B 看得到自己');
+  assert.ok(!bTitles.includes('外书'), 'B 看不到 A 的内容');
+
+  const aTitles = (await new Project(outer).documents()).map((d) => d.meta.title);
+  assert.ok(!aTitles.includes('B书'), 'A 也看不到 B 的内容');
 });
 
 test('initialization into a non-empty Obsidian folder keeps the author files untouched', async t => {

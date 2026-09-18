@@ -136,15 +136,54 @@ export async function rollback(root: string, id: string): Promise<void> {
   await atomic(root, journal, encode({ ...meta, status: 'rolled-back' }, '# Rolled back'));
   await moveJournal(root, journal, archived);
 }
-export async function discover(cwd: string): Promise<string | undefined> {
-  let root = await fs.realpath(cwd);
+/**
+ * 当前目录本身是不是小说项目根。
+ *
+ * **只看这一个目录，不往上找。** 一个目录就是一本书：只有在本目录放了
+ * `.novel/project.md` 才算激活，父目录的标记与本目录无关。
+ *
+ * 早先的实现会一路向上找到文件系统根，于是「A 是小说、B 是 A 的子目录」时
+ * 在 B 里打开 Pi 会激活 A —— 一本书悄悄变成了另一本书的一部分。
+ * 而那种行为无法区分「B 是 A 的子目录」与「B 是还没初始化的新书」，
+ * 所以直接取消上溯，让规则完全可预测。
+ */
+/** 解析真实路径；目录不存在时返回 null（不存在就不是小说根，不该抛异常）。 */
+async function realRoot(cwd: string): Promise<string | null> {
+  try {
+    return await fs.realpath(cwd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export async function projectAt(cwd: string): Promise<string | undefined> {
+  const root = await realRoot(cwd);
+  if (root === null) return undefined;
+  const marker = await readOptional(root, '.novel/project.md');
+  if (marker === null) return undefined;
+  return root;
+}
+
+/**
+ * 向上找到最近的项目根。
+ *
+ * **只用于在界面上给一句提示，绝不用于激活。**
+ * 开在小说的子目录里会静默失去写入保护（模型会拿到 bash/edit/write，skill 也不加载），
+ * 这是很隐蔽的坑，值得提醒；但按「一个目录就是一本书」的规则，
+ * 提醒不能变成替用户激活父目录。
+ */
+export async function projectAbove(cwd: string): Promise<string | undefined> {
+  let root = await realRoot(cwd);
+  if (root === null) return undefined;
   for (;;) {
-    if (await readOptional(root, '.novel/project.md') !== null) return root;
     const parent = path.dirname(root);
     if (parent === root) return undefined;
     root = parent;
+    if (await readOptional(root, '.novel/project.md') !== null) return root;
   }
 }
+
 export async function revision(root: string, name: string): Promise<string> {
   const text = await readOptional(root, name);
   if (text === null) throw new Error(`Not found: ${name}`);

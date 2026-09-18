@@ -8,7 +8,7 @@ import { Project, adoptDocument, initProject, kinds, labelOf } from './project.t
 import { migrate, planMigration } from './migrate.ts';
 import { decode } from './markdown.ts';
 import { FOUNDING, PLAN_FILE } from './kinds.ts';
-import { discover, locked, readOptional, rollback, transactionFiles } from './storage.ts';
+import { locked, projectAbove, projectAt, readOptional, rollback, transactionFiles } from './storage.ts';
 
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
@@ -24,9 +24,12 @@ const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() })
  */
 const help = `# pi-novel
 
+一个目录就是一本书。只有在这个目录里启动 Pi 才会激活小说模式，
+子目录不继承父目录的激活状态。
+
 前端用 Obsidian 读写，Pi 负责生成。所有内容都是普通 Markdown。
 
-/novel init [书名] — 在当前文件夹激活项目（允许非空目录）
+/novel init [书名] — 在当前文件夹激活（允许非空目录）
 /novel migrate — 把 format 1 旧项目升级到当前格式
 /novel close — 关闭本会话的管理保护
 
@@ -111,11 +114,18 @@ export default function novelExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     active = undefined;
-    const root = await discover(ctx.cwd);
-    // 只看到标记文件就进入受管模式，**即使项目本身有问题**。
+    // 只有当前目录本身算小说根，不向上找。
+    const root = await projectAt(ctx.cwd);
+    // 看到标记文件就进入受管模式，**即使项目本身有问题**。
     // 这是刻意的 fail-closed：项目坏了不能成为「任模型自由使用 bash/write/edit」的理由。
     // 具体问题由 need() 里的 validate() 报出来。
     if (root) active = new Project(root);
+    else if (ctx.hasUI) {
+      // 开在小说的子目录里会静默失去写入保护，这个坑很隐蔽，所以提醒一句。
+      // 注意：只提醒，不替用户激活父目录 —— 「一个目录就是一本书」。
+      const above = await projectAbove(ctx.cwd).catch(() => undefined);
+      if (above) ctx.ui.notify(`当前目录不是小说根（${above} 才是）。子目录不会激活小说模式，文件也不受保护；请在小说根目录启动 Pi。`, 'warning');
+    }
     await refresh(ctx);
   });
 
@@ -125,10 +135,10 @@ export default function novelExtension(pi: ExtensionAPI) {
     }
   });
 
-  // The package manifest deliberately does not declare skills: novel-manager is injected only when a
-  // project root is discoverable, so paper/code sessions never carry its description or trigger on it.
+  // The package manifest deliberately does not declare skills: novel-manager is injected only when the
+  // current directory is itself a project root, so paper/code sessions never carry its description.
   pi.on('resources_discover', async event => {
-    const root = await discover(event.cwd);
+    const root = await projectAt(event.cwd);
     if (!root) return;
     try { await new Project(root).validate(); } catch { return; }
     return { skillPaths: [fileURLToPath(new URL('../skills', import.meta.url))] };

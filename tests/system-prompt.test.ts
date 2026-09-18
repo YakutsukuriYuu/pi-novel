@@ -24,8 +24,16 @@ test('novel-manager is absent outside a project and present inside one', async t
   await fs.mkdir(code);
 
   const prompts = new Map<string, string>();
-  await fs.mkdir(path.join(novel, '章节'));
-  for (const cwd of [code, novel, path.join(novel, '章节')]) {
+  const chapterDir = path.join(novel, '章节');
+  await fs.mkdir(chapterDir);
+  // 第三个用例是关键：小说的子目录**不算**小说根，所以不注入 skill。
+  // 「一个目录就是一本书」—— 子目录不能隷隷继承父目录的激活状态。
+  const cases: [string, string, boolean][] = [
+    ['代码目录', code, false],
+    ['小说根', novel, true],
+    ['小说的子目录', chapterDir, false],
+  ];
+  for (const [label, cwd, expectSkill] of cases) {
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir,
@@ -48,19 +56,16 @@ test('novel-manager is absent outside a project and present inside one', async t
       const prompt = session.agent.state.systemPrompt ?? '';
       prompts.set(cwd, prompt);
       const names = loader.getSkills().skills.map(s => s.name);
-      if (cwd === code) {
-        assert.ok(!prompt.includes('novel-manager'), 'code session must not see the skill');
-        assert.deepEqual(names, [], 'manifest must not declare skills globally');
-      } else {
-        assert.ok(prompt.includes('novel-manager'), `novel session must see the skill: ${cwd}`);
-        assert.ok(names.includes('novel-manager'));
-      }
+      assert.equal(prompt.includes('novel-manager'), expectSkill, `${label} 是否应注入 skill`);
+      if (expectSkill) assert.ok(names.includes('novel-manager'));
+      else assert.ok(!names.includes('novel-manager'), `${label} 不应拿到 skill`);
+      if (cwd === code) assert.deepEqual(names, [], 'manifest must not declare skills globally');
     } finally {
       session.dispose();
     }
   }
-  // Project-root discovery must reach the same result with or without a project-root cwd.
-  assert.equal(prompts.get(novel)!.includes('novel-manager'), prompts.get(path.join(novel, '章节'))!.includes('novel-manager'));
+  assert.ok(prompts.get(novel)!.includes('novel-manager'));
+  assert.ok(!prompts.get(chapterDir)!.includes('novel-manager'), '开在小说子目录里不会激活小说模式');
 });
 
 test('corrupted project: fail-closed without injecting the skill', async t => {
