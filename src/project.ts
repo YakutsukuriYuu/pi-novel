@@ -350,14 +350,14 @@ export class Project {
   async mutate<T>(work: () => Promise<T>): Promise<T> {
     await this.validate();
     return locked(this.root, async () => {
-      if ((await pending(this.root)).length) throw new Error('有未完成的事务；先执行 /novel recover <ID>');
+      if ((await pending(this.root)).length) throw new Error('有未完成的事务；先让作者撤销它（novel_recover），再继续写入。');
       return work();
     });
   }
 
   async create(kind: string, title: string, refs: string[] = [], sources: Source[] = []): Promise<{ path: string; id: string; transaction: string }> {
     if (!isKind(kind)) throw new Error(`未知种类。可用：${Object.keys(kinds).join(', ')}`);
-    if (generatedKinds.has(kind)) throw new Error(`${labelOf(kind)} 由工具生成（如 /novel export），不能直接创建`);
+    if (generatedKinds.has(kind)) throw new Error(`${labelOf(kind)} 由工具生成（novel_export），不能直接创建`);
     if (CHAPTER_KINDS.has(kind)) throw new Error(`${labelOf(kind)} 属于章节三件套，请用 novel_new_chapter 创建，它保证三者成对存在`);
     if (!title.trim() || /[\r\n]/.test(title)) throw new Error('标题必须是单行非空文本');
     return this.mutate(async () => {
@@ -418,7 +418,7 @@ export class Project {
       const current = await this.read(planPath);
       if (current.revision !== expectedRevision) throw new Error('方案已被改动，请重新读取后再追加');
       if (current.meta.status !== 'draft') {
-        throw new Error('方案处于已批准状态，正文写作已解锁。要修改方案，请作者先执行 /novel reopen 撤回批准。');
+        throw new Error('方案处于已批准状态，正文写作已解锁。要修改方案，请先用 novel_authorize 请作者执行 reopen 撤回批准。');
       }
       const versions = [...current.body.matchAll(/^## 方案 v(\d+)/gm)].map((m) => Number(m[1]));
       const next = versions.length ? Math.max(...versions) + 1 : 1;
@@ -444,10 +444,10 @@ export class Project {
     if (kind !== 'chapter' || !name.endsWith(`/${BODY_FILE}`)) return;
     const planPath = `${folderOf(name)}/${PLAN_FILE}`;
     const plan = await readOptional(this.root, planPath);
-    if (plan === null) throw new Error(`本章缺少 ${PLAN_FILE}；先请作者用 /novel new 重建，或手动补一份方案。`);
+    if (plan === null) throw new Error(`本章缺少 ${PLAN_FILE}；请用 novel_new_chapter 重建，或手动补一份方案。`);
     const { meta, body } = decode(plan);
     if (meta.status !== 'confirmed') {
-      throw new Error('本章方案尚未被作者批准，不能写正文。先调 novel_propose 产出方案，再请作者执行 /novel approve。');
+      throw new Error('本章方案尚未被作者批准，不能写正文。先调 novel_propose 产出方案，再用 novel_authorize 请作者批准。');
     }
     // 批准后作者仍在 Obsidian 里改了方案文字 -> 批准失效。
     if (meta.approvedRevision !== hash(body)) {
@@ -824,7 +824,7 @@ function agentsTemplate(title: string): string {
 
 ## 写作流程
 
-- 写正文之前必须先有方案，且方案要经作者批准（/novel approve）。
+- 写正文之前必须先有方案，且方案要经作者批准（你发起 novel_authorize，作者点确认框）。
 - 正文与人物用 [[双方括号]] 引用其他笔记，方便在 Obsidian 里跳转和看关系图谱。
 
 ## 本书特有要求

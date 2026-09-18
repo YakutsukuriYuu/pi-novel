@@ -330,6 +330,12 @@ npm run check          # 类型检查 + 测试
 
 测试不调用在线模型、不读取你的模型密钥、不改真实小说。
 
+## 深入
+
+- [文件协议](docs/data-model.md) —— frontmatter 字段、状态机、来源为何记编号、事务格式
+- [工具契约](docs/tools.md) —— 17 个工具的完整参数、前置条件与失败情况
+- [恢复](docs/recovery.md) —— 撤销、未完成事务、Project locked、外部改动怎么处理
+
 ## 设计参考
 
 受到 [Denova](https://github.com/alfredxw/denova) 将创作规则、长期设定、正文与人物状态

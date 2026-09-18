@@ -11,6 +11,18 @@ import { locked, projectAbove, projectAt, readOptional, rollback, transactionFil
 import { READ_PATH_TOOLS, allowedTool, escapesProject, pathArgument, readOnlyTools } from './access.ts';
 import { DEFAULT_CONFIG, defaultConfigPath, loadConfig, type NovelConfig } from './config.ts';
 
+/**
+ * 作者需要手输的命令。
+ *
+ * 这是唯一来源：README、docs/、Skill 参考、以及代码里的报错信息都只能引用这几个名字。
+ * 抽成常量是为了让一致性测试能直接比对，而不是把名单再拄一份进测试里。
+ *
+ * 之所以会需要它：命令面从 23 个砍到 2 个之后，报错信息里还在教用户跑
+ * `recover`、`approve` 这些已经不存在的命令 —— 文档漂移不会让测试变红，
+ * 报错信息进错指令更难发现。
+ */
+export const COMMANDS = ['init', 'close', 'help'] as const;
+
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
 /**
@@ -551,7 +563,7 @@ Call this at most once, only when the work is genuinely ready and the author has
   pi.registerCommand('novel', {
     description: '小说项目：激活、迁移旧格式、关闭管理保护',
     getArgumentCompletions(prefix) {
-      return ['init', 'close', 'help'].filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
+      return COMMANDS.filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     async handler(args, ctx) {
       try {

@@ -66,6 +66,11 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
     assert.equal(tool(name).executionMode, 'sequential', `${name} 必须串行，否则并发确认框会卡死界面`);
   }
 
+  // 注册面与白名单必须完全对应。
+  // 注册了却不在白名单里的工具会被**自己的守卫拦死** —— 表面上存在，实际永远调不通；
+  // 白名单里却有不存在名字则是幻觉。两者都不会报错，只能靠这条断言守。
+  assert.deepEqual([...extension.tools.keys()].sort(), [...NOVEL_TOOLS].sort(), '注册的工具必须与白名单完全一致');
+
   // 建章会同时生成 方案/正文/摘要 三份
   const chapter = JSON.parse(await call('novel_new_chapter', { title: '雨夜' })) as { id: string; path: string; folder: string };
   assert.equal(chapter.path, '章节/0001-雨夜/正文.md');
