@@ -27,7 +27,7 @@ import {
   templateNameOf,
 } from './kinds.ts';
 
-/** 当前支持的工作区格式。迁移见 migrate.ts。 */
+/** 当前支持的工作区格式版本。版本之间不兼容，也不做自动升级。 */
 export const FORMAT = 2;
 
 const folderOf = (p: string) => p.split('/').slice(0, -1).join('/');
@@ -125,7 +125,7 @@ export async function initProject(directory: string, requestedTitle?: string): P
   const existingMeta = await readOptional(root, PROJECT_META);
   if (existingMeta) {
     const { meta } = decode(existingMeta);
-    throw new Error(`这里已经是一个 pi-novel 项目（format ${meta.format ?? '?'}）；直接在本目录启动 Pi 即可打开，或用 /novel migrate 升级格式。`);
+    throw new Error(`这里已经是一个 pi-novel 项目（format ${meta.format ?? '?'}），不要重复初始化。`);
   }
 
   const before = await survey(root);
@@ -217,8 +217,8 @@ export class Project {
     if (meta.kind !== 'project') throw new Error('项目标记文件损坏');
     if (meta.format !== FORMAT) {
       throw new Error(
-        meta.format === 1
-          ? '这是 format 1 的旧项目，请先运行 /novel migrate 升级；升级前请先提交或备份整个目录。'
+        meta.format !== FORMAT
+          ? '这是旧版（format 1）项目：目录是英文的、引用记的是文件路径。当前版本只认识中文目录 + 编号引用，两者不兼容，因此拒绝写入以免损坏原稿。请新建一本重新开始，或继续用旧版插件。'
           : `不支持的格式 ${String(meta.format)}；当前版本只支持 ${FORMAT}。`,
       );
     }

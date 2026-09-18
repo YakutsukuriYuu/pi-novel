@@ -5,7 +5,7 @@ description: 使用 pi-novel 管理长期小说项目：立项、设定、人物
 
 # 小说创作与管理
 
-作者用大白话跟你说话，你负责把流程走完。**除了 `/novel init`、`/novel migrate`、`/novel close`，
+作者用大白话跟你说话，你负责把流程走完。**除了 `/novel init` 和 `/novel close`，
 作者不需要、也不应该被要求输入任何命令** —— 也不要让他记文件路径。
 
 这本书的前端是 **Obsidian**：作者会直接用编辑器读写这些 Markdown，而且只维护这些 md 文件。

@@ -96,5 +96,5 @@ test('corrupted project: fail-closed without injecting the skill', async t => {
   // 并且模型要被明确告知项目有问题，才能转告作者怎么修。
   const started = await ext.handlers.get('before_agent_start')?.[0]?.({ type: 'before_agent_start', systemPrompt: 'BASE' }, ctx) as { systemPrompt?: string } | undefined;
   assert.match(started?.systemPrompt ?? '', /not usable/);
-  assert.match(started?.systemPrompt ?? '', /novel migrate/);
+  assert.match(started?.systemPrompt ?? '', /writes stay blocked/);
 });

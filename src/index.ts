@@ -5,7 +5,6 @@ import { Type } from 'typebox';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Project, adoptDocument, initProject, kinds, labelOf } from './project.ts';
-import { migrate, planMigration } from './migrate.ts';
 import { decode } from './markdown.ts';
 import { FOUNDING, PLAN_FILE } from './kinds.ts';
 import { locked, projectAbove, projectAt, readOptional, rollback, transactionFiles } from './storage.ts';
@@ -13,14 +12,11 @@ import { locked, projectAbove, projectAt, readOptional, rollback, transactionFil
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
 /**
- * 只有两类事情需要作者手动输入命令：
+ * 命令只有两个：**激活**和**解除保护**。
  *
- * 1. **激活**项目 —— 在那之前插件的 skill 不会加载，对话里也表达不了。
- * 2. **迁移旧格式** —— 破坏性、一次性，而且 format 1 项目里 skill 根本没加载，
- *    对话路径够不到它。
- *
- * 其他所有操作都通过和模型说话完成。需要你本人授权的那几步（采纳、确认、
- * 退回……）不再要求你输命令 —— 模型会发起请求，你在终端上点一下确认框。
+ * 前者必须手输，因为在那之前插件的 skill 不会加载，对话里也表达不了「这就是那本书」。
+ * 其他所有操作都通过和模型说话完成 —— 需要作者本人授权的那几步（采纳、确认、
+ * 退回……）由模型发起请求，你在终端上点一下确认框。
  */
 const help = `# pi-novel
 
@@ -30,7 +26,6 @@ const help = `# pi-novel
 前端用 Obsidian 读写，Pi 负责生成。所有内容都是普通 Markdown。
 
 /novel init [书名] — 在当前文件夹激活（允许非空目录）
-/novel migrate — 把 format 1 旧项目升级到当前格式
 /novel close — 关闭本会话的管理保护
 
 其余全部直接和模型说就行：
@@ -150,12 +145,12 @@ export default function novelExtension(pi: ExtensionAPI) {
       await active.validate();
     } catch (error) {
       // 项目不可用也不要让整轮对话起不来：写入保持封锁，但要把原因告诉模型，
-      // 它才能转告作者该跑 /novel migrate 还是手工修。
+      // 它才能转告作者发生了什么。
       return {
         systemPrompt: event.systemPrompt + `
 
 pi-novel found a project marker at ${active.root} but the project is not usable: ${(error as Error).message}
-All file writes stay blocked. Tell the author exactly what is wrong and suggest the fix (usually /novel migrate for a format 1 project). Do not try to repair the files yourself.`,
+All file writes stay blocked. Tell the author exactly what is wrong. Do not try to repair the files yourself.`,
       };
     }
     return {
@@ -163,7 +158,7 @@ All file writes stay blocked. Tell the author exactly what is wrong and suggest 
 
 pi-novel is managing a Markdown novel whose front end is Obsidian. The author talks to you in plain language and maintains the Markdown files himself. Load the novel-manager skill before creative work.
 
-You drive the workflow; the author should never need to type a slash command except /novel init, /novel migrate and /novel close.
+You drive the workflow; the author should never need to type a slash command except /novel init and /novel close.
 
 Workflow that must be respected:
 - Before writing any chapter body, build a chapter plan with novel_propose. Writing 正文.md before the author approves the plan is rejected by the tool.
@@ -516,7 +511,7 @@ Call this at most once, only when the work is genuinely ready and the author has
   pi.registerCommand('novel', {
     description: '小说项目：激活、迁移旧格式、关闭管理保护',
     getArgumentCompletions(prefix) {
-      return ['init', 'migrate', 'close', 'help'].filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
+      return ['init', 'close', 'help'].filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     async handler(args, ctx) {
       try {
@@ -546,33 +541,6 @@ Call this at most once, only when the work is genuinely ready and the author has
               : '',
             '\n接下来直接和模型说「我们立项吧」就行。第一个要定的是文风。',
           ].filter(Boolean).join('\n'));
-          await refresh(ctx);
-          return;
-        }
-
-        if (command === 'migrate') {
-          const root = path.resolve(ctx.cwd);
-          const plan = await planMigration(root);
-          const lines = [
-            '迁移计划（format 1 → 2）',
-            `书名：${plan.title}`,
-            `需要搬迁：${plan.moves.length} 份文档`,
-            `种类改名：${plan.kindRenames} 处（plan → chapter-plan）`,
-            `来源改绑编号：${plan.sourceRewrites} 份文档`,
-            plan.leftAlone.length
-              ? `\n不在迁移范围、保持原位：${plan.leftAlone.length} 份（如 AGENTS.md 和你自己的笔记）\n${plan.leftAlone.slice(0, 8).map(f => `- ${f}`).join('\n')}${plan.leftAlone.length > 8 ? `\n- …另有 ${plan.leftAlone.length - 8} 份` : ''}`
-              : '',
-            plan.unregistered.length
-              ? `\n没有 frontmatter、会原样搬过去：${plan.unregistered.length} 份\n${plan.unregistered.slice(0, 8).map(f => `- ${f}`).join('\n')}\n（搬完后可以用「收编」把它们纳入管理）`
-              : '',
-            plan.blockers.length ? `\n阻塞项：\n${plan.blockers.map(b => `- ${b}`).join('\n')}` : '\n没有阻塞项。',
-          ].filter(Boolean);
-          if (plan.blockers.length) { show(lines.join('\n')); return; }
-          if (!ctx.hasUI) throw new Error('迁移需要交互确认，请在交互模式下使用。');
-          if (!await ctx.ui.confirm('迁移项目格式', '会重写全部文档路径与来源绑定。请确认已经提交或备份整个目录。继续？')) return;
-          const result = await migrate(root);
-          active = new Project(result.plan.root);
-          show(`迁移完成。事务 ${result.transaction}\n如需退回：/novel migrate 之前先用 novel_recover ${result.transaction}\n请再跑一次检查。`);
           await refresh(ctx);
           return;
         }

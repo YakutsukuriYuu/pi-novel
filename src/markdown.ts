@@ -57,17 +57,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const SHA256 = /^[a-f0-9]{64}$/;
 
-export interface DecodeOptions {
-  /**
-   * 接受 format 1 的 `sources: [{ path, revision }]`。
-   *
-   * **仅供迁移读取旧文件时使用。** 校验器不能拿来读它自己要迁移的数据，
-   * 否则迁移读不进自己的输入 —— 这个坑真的踩过。默认仍然严格。
-   */
-  legacySources?: boolean;
-}
-
-function checkSources(sources: unknown, legacy: boolean): void {
+function checkSources(sources: unknown): void {
   if (sources === undefined) return;
   if (!Array.isArray(sources)) throw new Error('Invalid sources');
   for (const item of sources) {
@@ -75,13 +65,14 @@ function checkSources(sources: unknown, legacy: boolean): void {
     if (typeof item.revision !== 'string' || !SHA256.test(item.revision)) {
       throw new Error('Invalid sources: revision 必须是 sha256');
     }
+    // 只接受稳定编号。路径形式的来源会被明确拒绝——
+    // 作者会在 Obsidian 里重命名文件，路径引用必然失效。
     if (typeof item.id === 'string' && item.id.trim()) continue;
-    if (legacy && typeof item.path === 'string' && item.path) continue;
     throw new Error('Invalid sources: 每一项都需要稳定 id（不是路径）');
   }
 }
 
-export function decode(text: string, options: DecodeOptions = {}): { meta: Meta; body: string } {
+export function decode(text: string): { meta: Meta; body: string } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!match) throw new Error('Missing Markdown YAML frontmatter');
   const doc = parseDocument(match[1]);
@@ -91,7 +82,7 @@ export function decode(text: string, options: DecodeOptions = {}): { meta: Meta;
 
   for (const key of ['id', 'kind', 'title', 'status']) requireString(value[key], key);
 
-  checkSources(value.sources, options.legacySources === true);
+  checkSources(value.sources);
   optionalStringArray(value.refs, 'refs');
   optionalStringArray(value.aliases, 'aliases');
   optionalStringArray(value.tags, 'tags');

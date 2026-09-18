@@ -77,7 +77,8 @@ export async function commit(root: string, changes: Change[], title: string, opt
   const seen = new Set<string>();
   for (const c of changes) {
     // 迁移需要删除位于旧目录（lore/、setting/ …）的文件，那些路径按新规则已不受管。
-    // 只有 migrate 会传 allowUnmanaged，且它自己已经做过路径校验。
+    // 收编要搬动的源文件本来就在受管目录之外，所以它需要这个放行；
+    // 路径本身已在前面经过 readOptional → safePath 校验。
     if (!options.allowUnmanaged && !contentPath(c.path)) throw new Error(`Unmanaged write: ${c.path}`);
     await safePath(root, c.path);
     const key = c.path.toLowerCase();
@@ -113,7 +114,7 @@ export async function rollback(root: string, id: string): Promise<void> {
   if (!['pending', 'committed'].includes(meta.status) && !(pendingText && meta.status === 'rolled-back')) throw new Error('Transaction already recovered');
   const changes = meta.changes as Change[];
   if (!Array.isArray(changes) || !changes.length) throw new Error('Invalid transaction');
-  // 只有当初被明确授权的事务才能回写到不受管路径（迁移用）。
+  // 收编一个不受管的文件时需要放行受管路径检查（adopt 的整个意义就在于此）。
   // 路径穿越仍然由 safePath 拦着（readOptional/atomic 都会调它）。
   const relaxPaths = meta.allowUnmanaged === true;
   const targets = new Set<string>();
