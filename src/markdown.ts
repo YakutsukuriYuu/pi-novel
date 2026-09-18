@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto';
  * 来源引用。
  *
  * **用稳定 id 而不是路径。** 这个插件的前端是 Obsidian，作者用 F2 重命名文件或把笔记
- * 拖到别的文件夹都是日常操作。如果来源记的是路径，每重命名一次，所有摘要、状态、
- * 审稿的 sources 全部失效，`diagnostics()` 会刷满「Stale/missing source」。
+ * 拖到别的文件夹都是日常操作。如果来源记的是路径，每重命名一次，所有状态、
+ * 事件、审稿的 sources 全部失效，`diagnostics()` 会刷满「Stale/missing source」。
  *
  * 代价是 frontmatter 里看到的是 uuid，不可读。所以人读的来源写进正文：
  * `依据：[[章节/0001-雨夜/正文]]`；机器校验的放这里。

@@ -371,9 +371,9 @@ export class Project {
   }
 
   /**
-   * 新建一章：一次生成 方案 / 正文 / 摘要 三份文档。
+   * 新建一章：一次生成 方案 / 正文 两份文档。
    *
-   * 方案存在且必须被批准，正文才可写（见 write）。所以这里同时创建三份，
+   * 方案必须被批准，正文才可写（见 write）。两份一起创建，
    * 让作者一眼看到「先填方案」这个流程。
    */
   async newChapter(title: string): Promise<{ id: string; path: string; folder: string; order: number; transaction: string }> {
@@ -386,15 +386,13 @@ export class Project {
       const changes: Change[] = [];
       for (const { file, kind } of CHAPTER_FILES) {
         // 正文用裸 id：章节的身份就是它，planPath()/chapter() 都按这个 id 查找。
-        // 方案与摘要各带后缀，它们是从属于这一章的独立文档。
+        // 方案带后缀，它是从属于这一章的独立文档。
         const docId = kind === 'chapter' ? id : `${id}-${templateNameOf(kind)}`;
-        const refs = kind === 'chapter' || kind === 'summary' ? [id] : [];
+        const refs = kind === 'chapter' ? [id] : [];
         const order_ = kind === 'chapter' ? { order } : {};
-        // 摘要的 sources 故意留空：它必须在正文写完之后由 summary() 绑定精确版本，
-        // 这里先造一个空的 sources 会直接过不了 sha256 校验。
         changes.push({ path: `${folder}/${file}`, before: null, after: encode({ id: docId, kind, title, status: 'draft', refs, ...order_ }, await template(kind, title)) });
       }
-      return { id, path: `${folder}/${BODY_FILE}`, folder, order, transaction: await commit(this.root, changes, 'Create chapter (plan/body/summary)') };
+      return { id, path: `${folder}/${BODY_FILE}`, folder, order, transaction: await commit(this.root, changes, 'Create chapter (plan/body)') };
     });
   }
 
@@ -491,18 +489,6 @@ export class Project {
     });
   }
 
-  /** 章节摘要是「正文定稿」的前置条件，来源按编号绑定，重命名文件不影响它。 */
-  async summary(id: string, body: string, expectedChapter: string, expectedSummary = 'new'): Promise<string> {
-    return this.mutate(async () => {
-      const chapter = await this.chapter(id);
-      if (chapter.revision !== expectedChapter) throw new Error('正文已变化；请重新读取后再写摘要');
-      const name = `${folderOf(chapter.path)}/摘要.md`;
-      const before = await readOptional(this.root, name);
-      if ((before === null ? 'new' : hash(before)) !== expectedSummary) throw new Error('摘要版本冲突；请读取当前摘要，或首次创建时传 new');
-      return commit(this.root, [{ path: name, before, after: encode({ id: `${id}-summary`, kind: 'summary', title: chapter.meta.title, status: 'draft', refs: [id], sources: [{ id, revision: chapter.revision }] }, body) }], 'Update chapter summary');
-    });
-  }
-
   async transition(name: string, action: 'accept' | 'publish' | 'confirm' | 'reopen', expected: string): Promise<string> {
     return this.mutate(async () => {
       const doc = await this.read(name);
@@ -531,14 +517,6 @@ export class Project {
         if (action === 'publish' && doc.meta.status !== 'accepted') throw new Error('先采纳，再发布');
         if (action === 'publish' && doc.meta.canonicalBodyHash !== hash(doc.body)) throw new Error('已采纳的正文被外部改动；请 reopen 后重新采纳');
         if (!doc.body.replace(/^#.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '').trim()) throw new Error('正文为空，不能采纳');
-        const summaryPath = `${folderOf(doc.path)}/摘要.md`;
-        const summary = await readOptional(this.root, summaryPath);
-        if (summary === null) throw new Error('缺少章节摘要');
-        const parsed = decode(summary);
-        if (!parsed.body.replace(/^#.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '').trim()) throw new Error('摘要为空，不能采纳正文');
-        if (!parsed.meta.sources?.some((s) => s.id === doc.meta.id && s.revision === doc.revision)) {
-          throw new Error('摘要没有绑定当前正文版本；请重新保存摘要后再采纳');
-        }
         status = action === 'accept' ? 'accepted' : 'published';
       }
 
@@ -602,7 +580,7 @@ export class Project {
         }
       }
 
-      // 第二步：正文因 order 改写而内容变化 -> revision 变化。指向它的摘要必须重绑，
+      // 第二步：正文因 order 改写而内容变化 -> revision 变化。指向它的派生记录必须重绑，
       // 否则重排完立即变成「来源已过期」。
       //
       // 注意：真正破坏性的不是「路径变了」（来源存编号，路径无关），
@@ -664,6 +642,11 @@ export class Project {
       if (protectedStates.has(d.meta.status) && d.meta.canonicalBodyHash !== hash(d.body)) {
         issues.push(`受保护内容被外部改动：${d.path}；请 reopen 后重新确认/采纳`);
       }
+      // 种类被废弃后留下的文件。不报的话它们会一直静静地待在目录里、
+      // 在 catalog 里以未知种类出现，而没人知道该拿它们怎么办。
+      if (!isKind(d.meta.kind)) {
+        issues.push(`种类已废弃（${d.meta.kind}）：${d.path}；可以删除它，或换个 kind 继续用`);
+      }
       if (ids.has(d.meta.id)) issues.push(`编号重复：${d.meta.id}`);
       ids.add(d.meta.id);
       if (paths.has(d.path.toLowerCase())) issues.push(`路径大小写冲突：${d.path}`);
@@ -676,18 +659,10 @@ export class Project {
         if (!d.meta.order || orders.has(d.meta.order)) issues.push(`章节 order 非法或重复：${d.path}`);
         orders.add(d.meta.order!);
         const folder = folderOf(d.path);
-        if (!docs.some((s) => s.path === `${folder}/摘要.md`)) issues.push(`缺少摘要：${d.path}`);
         const plan = docs.find((p) => p.path === `${folder}/${PLAN_FILE}`);
         if (!plan) issues.push(`缺少方案：${d.path}`);
         else if (plan.meta.status === 'confirmed' && plan.meta.approvedRevision !== hash(plan.body)) {
           issues.push(`方案在批准后被改动，批准已失效：${plan.path}`);
-        }
-        // 作者可能在 Obsidian 里手改 frontmatter 把 status 设成 accepted，绕过采纳校验。
-        if (['accepted', 'published'].includes(d.meta.status)) {
-          const summary = docs.find((s) => s.path === `${folder}/摘要.md`);
-          if (summary && !summary.meta.sources?.some((s) => s.id === d.meta.id && s.revision === d.revision)) {
-            issues.push(`已采纳但摘要未绑定当前正文版本（可能是手动改了状态）：${d.path}`);
-          }
         }
       }
 
@@ -790,12 +765,6 @@ export class Project {
       if (!chapters.length) throw new Error('没有已采纳的章节可以导出');
       for (const chapter of chapters) {
         if (chapter.meta.canonicalBodyHash !== hash(chapter.body)) throw new Error(`已采纳正文被外部改动：${chapter.path}`);
-        const summaryPath = `${folderOf(chapter.path)}/摘要.md`;
-        const summary = await readOptional(this.root, summaryPath);
-        if (summary === null) throw new Error(`缺少摘要：${chapter.path}`);
-        if (!decode(summary).meta.sources?.some((s) => s.id === chapter.meta.id && s.revision === chapter.revision)) {
-          throw new Error(`摘要未绑定当前正文版本：${chapter.path}`);
-        }
       }
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;

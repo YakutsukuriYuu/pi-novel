@@ -14,7 +14,6 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 }
 
 const planPathOf = (chapterPath: string) => chapterPath.replace(/正文\.md$/, '方案.md');
-const summaryPathOf = (chapterPath: string) => chapterPath.replace(/正文\.md$/, '摘要.md');
 
 /**
  * 建章并把方案批准掉，但正文留空。
@@ -31,16 +30,13 @@ async function opened(p: Project, title = '雨夜') {
 }
 
 /**
- * 走完整的新流程：建章 → 追加方案 → 作者批准 → 写正文 → 存摘要。
+ * 走完整的新流程：建章 → 追加方案 → 作者批准 → 写正文。
  * 「正文之前必须先有被批准的方案」是本插件最核心的新约束，所以所有测试都经过它。
  */
 async function written(p: Project, title = '雨夜') {
   const c = await opened(p, title);
   const doc = await p.read(c.path);
   await p.write(c.path, doc.revision, '# 雨夜\n\n林默推开门。他尚不知道钥匙的来历。');
-  const final = await p.read(c.path);
-  const summary = await p.read(summaryPathOf(c.path));
-  await p.summary(c.id, '# 摘要\n\n林默推门，尚不知道钥匙来源。', final.revision, summary.revision);
   return { ...c, doc: await p.read(c.path) };
 }
 
@@ -144,7 +140,7 @@ test('all creatable kinds have templates; derived records require fresh sources 
   const personId = (await p.read(person.path)).meta.id;
 
   // 章节三件套由 newChapter 成对创建；export 由工具生成，都不接受直接创建。
-  const notCreatable = new Set(['chapter', 'chapter-plan', 'summary', 'export']);
+  const notCreatable = new Set(['chapter', 'chapter-plan', 'export']);
   for (const kind of Object.keys(kinds)) {
     if (notCreatable.has(kind)) continue;
     const made = await p.create(kind, `中文 ${kind}`, [personId], [{ id: chapter.id, revision: chapter.doc.revision }]);
@@ -230,7 +226,7 @@ test('local patches are exact, unique, non-overlapping and revision checked', as
   await assert.rejects(p.patch(c.path, changed.revision, [{ oldText: '林默关上门', newText: 'A' }, { oldText: '关上门', newText: 'B' }]), /重叠/);
 });
 
-test('acceptance requires prose and a current summary, protects text, and rebinds sources', async t => {
+test('acceptance requires non-empty prose, protects text, and survives reopen', async t => {
   const p = await fixture(t);
   // 方案已批准但正文仍为空，用来验证「空正文不能采纳」
   const empty = await opened(p, '空章');
@@ -246,7 +242,9 @@ test('acceptance requires prose and a current summary, protects text, and rebind
   await p.transition(c.path, 'reopen', d.revision);
   d = await p.read(c.path);
   await p.write(c.path, d.revision, `${d.body}\n\n新的事件。`);
-  await assert.rejects(p.transition(c.path, 'accept', (await p.read(c.path)).revision), /摘要没有绑定当前正文版本/);
+  // 摘要去掉之后，采纳只要求正文非空 ——「正文改了但记录没跟上」那道闸门没有了
+  await p.transition(c.path, 'accept', (await p.read(c.path)).revision);
+  assert.equal((await p.read(c.path)).meta.status, 'accepted');
 });
 
 test('confirmed lore cannot be silently overwritten', async t => {
@@ -292,6 +290,10 @@ test('founding progress is reported separately from structural faults', async t 
 test('external changes invalidate sources; IDs survive reorder; export is canonical only', async t => {
   const p = await fixture(t); const a = await written(p, '一'); const b = await written(p, '二');
   await p.transition(a.path, 'accept', a.doc.revision);
+  // 一条绑定本章的派生记录。重排会改写正文的 order（内容变了 → 版本变了），
+  // 它必须跟着重绑，否则重排完就立刻「来源已过期」。
+  const state = await p.create('state', '一之后', [], await p.sources([a.id]));
+
   const exported = await p.exportBook(); const snapshot = await p.read(exported.path);
   assert.equal(snapshot.meta.sources?.length, 1);
   await assert.rejects(p.write(exported.path, snapshot.revision, '覆盖快照'), /受保护内容/);
@@ -300,12 +302,13 @@ test('external changes invalidate sources; IDs survive reorder; export is canoni
   assert.equal((await p.chapters())[0]!.meta.id, b.id);
   const aAfter = await p.chapter(a.id);
   assert.match(aAfter.path, /0002-一\/正文\.md$/, 'reorder renames folders to readable NNNN-title');
-  // 来源按编号绑定，移动文件夹不会让它过期 —— 这正是本次改造要拿到的东西。
-  assert.ok(!(await p.diagnostics()).some(x => x.includes('来源已过期')), 'reorder must not expire sources');
+  assert.ok(!(await p.diagnostics()).some(x => x.includes('来源已过期')), 'reorder 必须重绑来源');
+  // 重绑确实发生了：状态记录现在指向正文的新版本
+  assert.deepEqual((await p.read(state.path)).meta.sources, [{ id: a.id, revision: aAfter.revision }]);
 
   await fs.appendFile(path.join(p.root, aAfter.path), '\n外部编辑。\n');
   assert.ok((await p.diagnostics()).some(x => x.includes('来源已过期')));
-  await assert.rejects(p.exportBook(), /外部改动|摘要未绑定/);
+  await assert.rejects(p.exportBook(), /外部改动/);
 });
 
 test('rollback restores exact content and refuses to clobber newer author edits', async t => {
@@ -387,21 +390,11 @@ test('title changes preserve stable paths, ID and prose', async t => {
   assert.equal(after.meta.title, '新的标题'); assert.equal(after.meta.id, before.meta.id); assert.equal(after.body, before.body);
 });
 
-test('summary updates require the current summary revision, not just the chapter revision', async t => {
-  const p = await fixture(t); const c = await written(p);
-  const summaryPath = summaryPathOf(c.path);
-  const old = await p.read(summaryPath);
-  await assert.rejects(p.summary(c.id, '覆盖作者摘要', c.doc.revision), /摘要版本冲突/);
-  await p.summary(c.id, '# 摘要\n\n新版事实。', c.doc.revision, old.revision);
-  await assert.rejects(p.summary(c.id, '再覆盖', c.doc.revision, old.revision), /摘要版本冲突/);
-});
-
-test('external edits to accepted prose require reacceptance even after summary refresh', async t => {
+test('external edits to accepted prose require reacceptance', async t => {
   const p = await fixture(t); const c = await written(p);
   await p.transition(c.path, 'accept', c.doc.revision);
   await fs.appendFile(path.join(p.root, c.path), '\n\n作者改了情节。\n');
-  const altered = await p.read(c.path); const summary = await p.read(summaryPathOf(c.path));
-  await p.summary(c.id, '# 摘要\n\n包括作者修改。', altered.revision, summary.revision);
+  const altered = await p.read(c.path);
   assert.ok((await p.diagnostics()).some(s => s.includes('受保护内容被外部改动')));
   await assert.rejects(p.exportBook(), /外部改动/);
   await assert.rejects(p.transition(c.path, 'publish', altered.revision), /外部改动/);
@@ -471,9 +464,6 @@ test('reorder migrates chapter folders to readable names and keeps summaries val
   assert.equal(aNow.path, '章节/0002-雨夜/正文.md');
   assert.equal(bNow.path, '章节/0001-天明/正文.md');
   assert.equal(aNow.meta.order, 2); assert.equal(bNow.meta.order, 1);
-  // 来源按编号绑定，所以重排后摘要仍指向同一份正文，不需要重绑
-  const summary = await p.read(summaryPathOf(aNow.path));
-  assert.deepEqual(summary.meta.sources, [{ id: a.id, revision: aNow.revision }], 'summary still bound to the same chapter');
   assert.deepEqual(await p.diagnostics(), []);
   assert.equal(aNow.meta.id, a.id);
   await p.exportBook();

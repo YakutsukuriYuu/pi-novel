@@ -174,8 +174,7 @@ sources: []
 │   └── 剧情线/
 ├── 章节/0001-雨夜/
 │   ├── 方案.md                  ★ 写正文前的方案，须经作者批准
-│   ├── 正文.md
-│   └── 摘要.md                  绑定正文版本，采纳的前置条件
+│   └── 正文.md
 ├── 当前状态/                     按时点切片
 │   ├── 人物/0001-林默.md
 │   └── 关系/0001-林默×沈遥.md
@@ -193,7 +192,7 @@ sources: []
 - **`时间线/` ≠ `当前状态/`**：前者记客观发生了什么，后者记人物*以为*发生了什么。
   两者的差值就是叙事张力 —— 合并它就丢了东西。
 
-### 文档种类（31 种）
+### 文档种类（30 种）
 
 | 目录 | 种类 |
 | --- | --- |
@@ -204,7 +203,7 @@ sources: []
 | `人物/关系/` | `relationship` |
 | `大纲/` | `outline` `volume` |
 | `大纲/剧情线/` | `arc` |
-| `章节/` | `chapter-plan` `chapter` `summary` |
+| `章节/` | `chapter-plan` `chapter` |
 | `当前状态/人物` `关系` | `state` `relationship-state` |
 | `时间线/` | `event` `timeline` |
 | `伏笔/` `情感线/` | `thread` `emotion` |
@@ -214,10 +213,8 @@ sources: []
 
 - **草稿不等于正史**：`accepted` / `published` / `confirmed` 的内容要先由作者退回草稿才能改。
 - **计划不等于事实**：方案、灵感、提案是想法，不是已经发生的事。
-- **派生资料可追溯**：摘要、状态、事件、关系变化、审稿都记录来源编号与精确版本；
+- **派生资料可追溯**：状态、事件、关系变化、审稿都记录来源编号与精确版本；
   正文一改，来源即过期，`novel_check` 会报出来。
-- **采纳需要当前摘要**：正文必须有绑定当前版本的摘要才能被采纳 —— 防止「正文改了、
-  摘要还是旧的」被随手通过。
 - **变更有记录**：每次写入都是事务，保留前后完整 Markdown，可以整体回滚。
   撤回时若发现有后续或外部修改，**拒绝执行**而不是覆盖。
 - **外部编辑可发现**：你随时用 Obsidian 改文件都不会被静默吞掉，已受保护的内容一旦被改动
@@ -229,7 +226,7 @@ sources: []
 
 | | 工具 |
 | --- | --- |
-| **放行** | `read` `grep` `find` `ls` `ffgrep` `fffind` `web_search` `web_fetch` + 17 个 `novel_*` |
+| **放行** | `read` `grep` `find` `ls` `ffgrep` `fffind` `web_search` `web_fetch` + 16 个 `novel_*` |
 | **拦下** | `bash` `edit` `write` `powershell`、`subagent`、`mcp` `mcpScript`、以及**一切未知工具** |
 
 保留 `bash`/`edit`/`write` 会让模型的每次落盘都绕过内核 —— 索引、版本追踪、事务记录、
@@ -291,10 +288,9 @@ sources: []
 | `novel_context` | 列出本章该读哪些文件（只是清单，不是内容） |
 | `novel_history` | 修改历史 |
 | `novel_create` | 新建设定类文档 |
-| `novel_new_chapter` | 建章，同时生成 方案 / 正文 / 摘要 |
+| `novel_new_chapter` | 建章，同时生成 方案 / 正文 |
 | `novel_propose` | **只追加**一轮章节方案 |
 | `novel_write` / `novel_patch` / `novel_rename` | 整篇替换 / 局部修改 / 改标题 |
-| `novel_summary` | 保存章节摘要并绑定正文版本 |
 | `novel_authorize` | **请求作者授权**（弹确认框） |
 | `novel_adopt` | 收编你手写的裸 md（弹确认框） |
 | `novel_reorder` | 重排章节（弹确认框） |
@@ -333,7 +329,7 @@ npm run check          # 类型检查 + 测试
 ## 深入
 
 - [文件协议](docs/data-model.md) —— frontmatter 字段、状态机、来源为何记编号、事务格式
-- [工具契约](docs/tools.md) —— 17 个工具的完整参数、前置条件与失败情况
+- [工具契约](docs/tools.md) —— 16 个工具的完整参数、前置条件与失败情况
 - [恢复](docs/recovery.md) —— 撤销、未完成事务、Project locked、外部改动怎么处理
 
 ## 设计参考

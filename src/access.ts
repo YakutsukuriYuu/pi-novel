@@ -46,7 +46,7 @@ export const NOVEL_TOOLS = [
   'novel_check', 'novel_catalog', 'novel_read', 'novel_context', 'novel_history',
   // 写作
   'novel_create', 'novel_new_chapter', 'novel_propose', 'novel_write',
-  'novel_patch', 'novel_rename', 'novel_summary',
+  'novel_patch', 'novel_rename',
   // 作者授权（弹确认框）
   'novel_authorize',
   // 维护

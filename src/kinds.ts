@@ -65,11 +65,10 @@ export const KINDS: readonly KindDef[] = [
   { kind: 'volume', label: '分卷', folder: '大纲', confirmable: true },
   { kind: 'arc', label: '剧情线', folder: '大纲/剧情线', confirmable: true },
 
-  // ── 章节三件套 ───────────────────────────────────────────────────
+  // ── 章节两件套 ───────────────────────────────────────────────────
   // 方案必须先被作者批准，正文才允许写入（见 Project.write）。
   { kind: 'chapter-plan', label: '章节方案', folder: '章节', template: 'chapter-plan', confirmable: true },
   { kind: 'chapter', label: '章节正文', folder: '章节' },
-  { kind: 'summary', label: '章节摘要', folder: '章节', derived: true },
 
   // ── 追踪：随时间变化的事实 ────────────────────────────────────────
   { kind: 'state', label: '人物状态', folder: '当前状态/人物', derived: true },
@@ -148,15 +147,13 @@ export const AREAS: ReadonlySet<string> = new Set(
 /** 根级的受管文件（不在任何目录下）。 */
 export const ROOT_DOCS: ReadonlySet<string> = new Set(['创作约定.md']);
 
-/** 章节三件套的文件名。方案必须先被批准，正文才允许写入。 */
+/** 章节两件套：方案 + 正文。方案先被批准，正文才能写。 */
 export const PLAN_FILE = '方案.md';
 export const BODY_FILE = '正文.md';
-export const SUMMARY_FILE = '摘要.md';
 
 export const CHAPTER_FILES: readonly { file: string; kind: string }[] = [
   { file: PLAN_FILE, kind: 'chapter-plan' },
   { file: BODY_FILE, kind: 'chapter' },
-  { file: SUMMARY_FILE, kind: 'summary' },
 ];
 
 export const CHAPTER_DIR = '章节';

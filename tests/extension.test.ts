@@ -71,11 +71,12 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
   // 白名单里却有不存在名字则是幻觉。两者都不会报错，只能靠这条断言守。
   assert.deepEqual([...extension.tools.keys()].sort(), [...NOVEL_TOOLS].sort(), '注册的工具必须与白名单完全一致');
 
-  // 建章会同时生成 方案/正文/摘要 三份
+  // 建章会同时生成 方案/正文 两份
   const chapter = JSON.parse(await call('novel_new_chapter', { title: '雨夜' })) as { id: string; path: string; folder: string };
   assert.equal(chapter.path, '章节/0001-雨夜/正文.md');
   const planPath = '章节/0001-雨夜/方案.md';
-  const summaryPath = '章节/0001-雨夜/摘要.md';
+  // 章节目录里只应该有两份文档：方案 + 正文
+  assert.deepEqual((await fs.readdir(path.join(book, '章节/0001-雨夜'))).sort(), ['方案.md', '正文.md']);
 
   // 方案未批准之前，正文必须写不进去
   const before = JSON.parse(await call('novel_read', { path: chapter.path }));
@@ -116,13 +117,7 @@ test('Pi loads package and skill; the plan gate and the author gate both hold', 
   assert.equal(JSON.parse(await call('novel_catalog', { offset: 1, limit: 100 })).nextOffset, null);
   assert.equal(JSON.parse(await call('novel_catalog', { query: '走入雨中' })).total, 1);
 
-  // 采纳需要绑定当前正文版本的摘要
-  const body = JSON.parse(await call('novel_read', { path: chapter.path }));
-  await assert.rejects(call('novel_authorize', { action: 'accept', path: chapter.path }), /摘要/);
-  const summary = JSON.parse(await call('novel_read', { path: summaryPath }));
-  await call('novel_summary', { chapterId: chapter.id, expectedChapterRevision: body.revision, expectedSummaryRevision: summary.revision, body: '# 摘要\n\n林默推门走入雨中。' });
-
-  // 采纳也要作者点确认
+  // 采纳要作者点确认
   confirmAnswer = false;
   await call('novel_authorize', { action: 'accept', path: chapter.path });
   assert.equal(JSON.parse(await call('novel_read', { path: chapter.path })).status, 'draft', '拒绝后不得采纳');
@@ -193,7 +188,7 @@ test('会弹确认框的工具都标了串行执行，且白名单与 SKILL.md �
     'novel_adopt', 'novel_authorize', 'novel_catalog', 'novel_check', 'novel_context',
     'novel_create', 'novel_export', 'novel_history', 'novel_new_chapter', 'novel_patch',
     'novel_propose', 'novel_read', 'novel_recover', 'novel_rename', 'novel_reorder',
-    'novel_summary', 'novel_write',
+    'novel_write',
   ]);
 
   for (const name of NOVEL_TOOLS) assert.ok(allowedTool(name), name);

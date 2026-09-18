@@ -50,7 +50,7 @@ sources: []
 这是本协议里最重要的一条决定。
 
 作者会在 Obsidian 里按 F2 重命名 `正文.md`，或者把整个章节目录拖到别处 —— 这是日常操作，
-插件拦不住。如果来源记的是路径，**每重命名一次，所有摘要、状态、审稿的来源就全部失效**。
+插件拦不住。如果来源记的是路径，**每重命名一次，所有状态、事件、审稿的来源就全部失效**。
 
 改成编号之后，重命名、移动、重排章节顺序都不影响任何追溯链。
 
@@ -81,22 +81,21 @@ sources: []
 `chapter-plan` `emotion` `timeline`
 
 **派生资料**（5 种，只有 `draft`，且必须带 `sources`）：
-`summary` `relationship-state` `state` `event` `review`
+`relationship-state` `state` `event` `review`
 
 **其余**：`chapter`（走 accept/publish）、`thread` `idea` `research` `proposal` `creator`
 （保留草稿）、`export`（工具生成，不接受直接创建）。
 
 `accepted` / `published` / `confirmed` 的内容**拒绝任何正文写入**，必须先 `reopen`。
 
-## 章节三件套
+## 章节两件套
 
 一章是**一个目录**里的三份文档：
 
 ```text
 章节/0001-雨夜/
 ├── 方案.md     kind: chapter-plan
-├── 正文.md     kind: chapter      ← 作品的正文
-└── 摘要.md     kind: summary      派生资料
+└── 正文.md     kind: chapter      ← 作品的正文
 ```
 
 **方案必须先被作者批准，`正文.md` 才允许写入。**
@@ -116,8 +115,7 @@ sources: []
 
 派生资料通过 `sources` 绑定来源的精确版本，因此：
 
-- 摘要绑定正文版本 → 正文一改，摘要过期 → 无法采纳，必须重新核对
-- 状态/事件绑定章节 → 章节一改，旧状态记录被标为过期
+- 状态/事件绑定章节 → 章节一改，旧记录被标为过期
 
 ## 事务
 
@@ -152,7 +150,7 @@ sources: []
 | `人物/关系/` | `relationship` |
 | `大纲/` | `outline` `volume` |
 | `大纲/剧情线/` | `arc` |
-| `章节/<NNNN-标题>/` | `chapter-plan` `chapter` `summary` |
+| `章节/<NNNN-标题>/` | `chapter-plan` `chapter` |
 | `当前状态/人物` `当前状态/关系` | `state` `relationship-state` |
 | `时间线/` | `event` `timeline` |
 | `伏笔/` | `thread` |
@@ -193,6 +191,6 @@ sources: []
 | 草稿 | 没有影响，继续写 |
 | `accepted` / `published` / `confirmed` 的正文 | `novel_check` 报「受保护内容被外部改动」，需要 reopen 后重新确认 |
 | 已批准的章节方案 | 批准自动失效，正文重新上锁 |
-| frontmatter 的 `status`（比如手动改成 `accepted`） | `novel_check` 发现摘要没绑定当前版本并报出来 |
+| frontmatter 的 `status`（比如手动改成 `accepted`） | `novel_check` 根据保护哈希发现正文被改过 |
 
 这些都不是错误，是「你动了原文」被如实记录。

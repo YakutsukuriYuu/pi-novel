@@ -340,7 +340,7 @@ Rules:
 
   pi.registerTool({
     name: 'novel_create', label: '创建小说资料',
-    description: `Create a template-backed setting/continuity document. No prose is fabricated. Derived records (summary/state/event/relationship-state/review) require sources. refs and sources take stable document IDs, never paths.
+    description: `Create a template-backed setting/continuity document. No prose is fabricated. Derived records (state/event/relationship-state/review) require sources. refs and sources take stable document IDs, never paths.
 
 可用种类：${Object.keys(kinds).join(', ')}`,
     parameters: Type.Object({
@@ -357,7 +357,7 @@ Rules:
 
   pi.registerTool({
     name: 'novel_new_chapter', label: '新建章节',
-    description: 'Create a chapter as three documents: 方案.md / 正文.md / 摘要.md. The plan must be approved by the author before 正文.md can be written.',
+    description: 'Create a chapter as two documents: 方案.md / 正文.md. The plan must be approved by the author before 正文.md can be written.',
     parameters: Type.Object({ title: Type.String() }),
     async execute(_id, args, signal) {
       const p = await need();
@@ -422,22 +422,7 @@ Use this only after discussing the plan with the author in conversation and bein
     },
   });
 
-  pi.registerTool({
-    name: 'novel_summary', label: '保存章节摘要',
-    description: 'Create/update a factual chapter summary grounded in the exact chapter revision read. Source binding uses the chapter ID, so renaming files is safe. The author cannot accept a chapter without a current summary.',
-    parameters: Type.Object({
-      chapterId: Type.String(),
-      expectedChapterRevision: Type.String(),
-      expectedSummaryRevision: Type.String(),
-      body: Type.String(),
-    }),
-    async execute(_id, args, signal) {
-      const p = await need();
-      return output(await mutate(p, signal, () => p.summary(args.chapterId, args.body, args.expectedChapterRevision, args.expectedSummaryRevision)));
-    },
-  });
-
-  // ── 作者授权（唯一能改变受保护状态的入口） ──────────────────────────
+  // ── 作者授权（唯一能改变受保护状态的入口） ────────────────────────
 
   // as const 是必需的：StringEnum 会从数组元素推出字面量联合，
   // 内联数组会被推成 string[]，于是索引 AUTHORIZE 和 transition 都会失败。
@@ -458,7 +443,7 @@ Use this only after discussing the plan with the author in conversation and bein
     description: `Ask the AUTHOR to approve a protected state change. This is the only way canon changes state, and it always shows a confirmation dialog the author answers — you cannot approve anything yourself.
 
 action:
-- accept  — 采纳章节正文（要求已有绑定当前版本的摘要）
+- accept  — 采纳章节正文（正文非空，且由你点确认）
 - publish — 发布已采纳的章节
 - confirm — 确认设定类内容或章节方案
 - reopen  — 退回草稿，解除保护
@@ -520,7 +505,7 @@ Call this at most once, only when the work is genuinely ready and the author has
       const p = await need();
       const chapters = await p.chapters();
       const before = chapters.map((c) => `${c.meta.order}. ${c.meta.title}`).join('\n');
-      const approved = await askAuthor(ctx, '调整章节顺序？', `当前顺序：\n${before}\n\n会重命名章节目录。摘要与状态记录按编号绑定，不会因此过期。`);
+      const approved = await askAuthor(ctx, '调整章节顺序？', `当前顺序：\n${before}\n\n会重命名章节目录。状态与事件记录按编号绑定，不会因此过期。`);
       if (!approved) return output(DECLINED);
       return output(await mutate(p, signal, () => p.reorder(args.ids)));
     },
@@ -550,7 +535,7 @@ Call this at most once, only when the work is genuinely ready and the author has
 
   pi.registerTool({
     name: 'novel_export', label: '导出已采纳章节',
-    description: 'Concatenate every accepted/published chapter into one Markdown file under 导出/. Refuses if accepted prose changed externally or a summary is stale.',
+    description: 'Concatenate every accepted/published chapter into one Markdown file under 导出/. Refuses if accepted prose changed externally.',
     parameters: Type.Object({}),
     async execute(_id, _args, signal) {
       const p = await need();
