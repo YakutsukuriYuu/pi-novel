@@ -52,6 +52,12 @@ export default function novelExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async event => {
     if (active && !allowedTool(event.toolName)) return { block: true, reason: 'pi-novel managed session: use novel_* tools. Arbitrary shell/write/edit/other extension tools are blocked. The author can /novel close to leave managed mode.' };
   });
+  // The package manifest deliberately does not declare skills: novel-manager is injected only when a
+  // project root is discoverable, so paper/code sessions never carry its description or trigger on it.
+  pi.on('resources_discover', async event => {
+    if (!await discover(event.cwd)) return;
+    return { skillPaths: [fileURLToPath(new URL('../skills', import.meta.url))] };
+  });
   pi.on('before_agent_start', async event => {
     if (!active) return;
     await active.validate();

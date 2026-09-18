@@ -21,8 +21,15 @@ test('Pi loads package and skill, tools run, hooks protect writes and survive st
   assert.deepEqual(result.errors, []);
   const extension = result.extensions.find(e => e.path.endsWith('src/index.ts'));
   assert.ok(extension, 'extension discovered via package manifest');
-  assert.ok(loader.getSkills().skills.some(s => s.name === 'novel-manager'));
   const ctx = { cwd: book, hasUI: false } as ExtensionContext;
+  assert.deepEqual(loader.getSkills().skills, [], 'manifest must not expose the skill globally');
+  const discover = extension.handlers.get('resources_discover') ?? [];
+  const outside = await discover[0]?.({ type: 'resources_discover', cwd: agentDir, reason: 'startup' }, ctx);
+  assert.equal(outside, undefined, 'no skill outside a project');
+  const inside = await discover[0]?.({ type: 'resources_discover', cwd: book, reason: 'startup' }, ctx) as { skillPaths?: string[] } | undefined;
+  assert.ok(inside?.skillPaths?.length, 'skill offered inside a project');
+  loader.extendResources({ skillPaths: inside!.skillPaths!.map(p => ({ path: p, metadata: {} as never })) });
+  assert.ok(loader.getSkills().skills.some(s => s.name === 'novel-manager'));
   for (const hook of extension.handlers.get('session_start') ?? []) await hook({type:'session_start', reason:'startup'}, ctx);
   const tool = (name: string) => {
     const entry = extension.tools.get(name); assert.ok(entry); return entry.definition;

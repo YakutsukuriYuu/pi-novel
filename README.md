@@ -72,7 +72,17 @@ pi
 | Markdown 事务、旧版本、冲突恢复 | 从正文整理事实摘要、状态与关系变化 |
 | 目录检索、分页读取、上下文路径清单 | 挑选相关设定，区分人物/作者/读者知识 |
 
-Skill 随包一起安装，支持 `/skill:novel-manager`。`/novel write|polish|review|plan` 显式加载内置 Skill，因此不依赖模型是否碰巧触发技能。默认当前模型自审，不自动启动子代理。
+Skill 随包一起安装。`/novel write|polish|review|plan` 显式加载内置 Skill，因此不依赖模型是否碰巧触发技能。默认当前模型自审，不自动启动子代理。
+
+### Skill 只在小说项目里出现
+
+包清单不声明 skills。扩展在 `resources_discover` 时向上查找 `.novel/project.md`，只有找到项目根才把 `skills/` 注入本次会话。因此：
+
+- 在论文、代码或其他目录：`novel-manager` 的描述**不进 system prompt**，不会因「修改章节」等词误匹配。
+- 在小说项目目录（含任意子目录）：描述正常出现，可自动触发，也可用 `/skill:novel-manager`。
+- `/novel` 命令和 `novel_*` 工具仍然全局注册，但在非项目目录下调用会明确报「没有活动小说」。
+
+`/novel close` 只关闭当前会话的写入保护，已经注入的 Skill 描述会保留到该会话结束。
 
 ## 文件结构
 
