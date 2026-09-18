@@ -2,11 +2,15 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { decode, encode, hash } from './markdown.ts';
+import { AREAS, ROOT_DOCS } from './kinds.ts';
 
 export interface Change { path: string; before: string | null; after: string | null }
-const areas = new Set(['setting', 'outline', 'lore', 'chapters', 'continuity', 'workspace', 'reviews', 'exports']);
+/**
+ * 受管路径判定。常目白名单来自 kinds.ts，因此新增种类时不可能忘记同步这里
+ * ——改造前 `kinds` / `areas` / `paths()` 各有一份，三份必然漂移。
+ */
 export function contentPath(name: string): boolean {
-  return name === 'CREATOR.md' || (areas.has(name.split('/')[0]) && name.endsWith('.md'));
+  return ROOT_DOCS.has(name) || (AREAS.has(name.split('/')[0] ?? '') && name.endsWith('.md'));
 }
 export async function safePath(root: string, name: string): Promise<string> {
   if (!name || name.includes('\\') || name.includes('\0') || path.isAbsolute(name) || name.split('/').some(p => !p || p === '.' || p === '..' || /[<>:"|?*\x00-\x1f]/.test(p) || /[. ]$/.test(p) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p))) throw new Error(`Unsafe relative path: ${name}`);
@@ -67,12 +71,14 @@ async function moveJournal(root: string, from: string, to: string): Promise<void
   await fs.rename(await safePath(root, from), target);
 }
 /** Caller holds the project lock and project mutation queue. Journals retain exact old/new Markdown. */
-export async function commit(root: string, changes: Change[], title: string): Promise<string> {
+export async function commit(root: string, changes: Change[], title: string, options: { allowUnmanaged?: boolean } = {}): Promise<string> {
   if ((await pending(root)).length) throw new Error('Unfinished transaction: recover it before writing.');
   if (!changes.length) throw new Error('No changes');
   const seen = new Set<string>();
   for (const c of changes) {
-    if (!contentPath(c.path)) throw new Error(`Unmanaged write: ${c.path}`);
+    // 迁移需要删除位于旧目录（lore/、setting/ …）的文件，那些路径按新规则已不受管。
+    // 只有 migrate 会传 allowUnmanaged，且它自己已经做过路径校验。
+    if (!options.allowUnmanaged && !contentPath(c.path)) throw new Error(`Unmanaged write: ${c.path}`);
     await safePath(root, c.path);
     const key = c.path.toLowerCase();
     if (seen.has(key)) throw new Error('Duplicate transaction path');

@@ -19,13 +19,13 @@ test('novel-manager is absent outside a project and present inside one', async t
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const agentDir = path.join(root, 'agent');
   await fs.mkdir(agentDir);
-  const novel = await initProject(path.join(root, 'novel'), '探针');
+  const novel = (await initProject(path.join(root, 'novel'), '探针')).root;
   const code = path.join(root, 'code');
   await fs.mkdir(code);
 
   const prompts = new Map<string, string>();
-  await fs.mkdir(path.join(novel, 'chapters'));
-  for (const cwd of [code, novel, path.join(novel, 'chapters')]) {
+  await fs.mkdir(path.join(novel, '章节'));
+  for (const cwd of [code, novel, path.join(novel, '章节')]) {
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir,
@@ -60,7 +60,7 @@ test('novel-manager is absent outside a project and present inside one', async t
     }
   }
   // Project-root discovery must reach the same result with or without a project-root cwd.
-  assert.equal(prompts.get(novel)!.includes('novel-manager'), prompts.get(path.join(novel, 'chapters'))!.includes('novel-manager'));
+  assert.equal(prompts.get(novel)!.includes('novel-manager'), prompts.get(path.join(novel, '章节'))!.includes('novel-manager'));
 });
 
 test('corrupted project: fail-closed without injecting the skill', async t => {
