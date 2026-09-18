@@ -3,39 +3,40 @@ import { truncateHead, withFileMutationQueue } from '@earendil-works/pi-coding-a
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Project, adoptDocument, initProject, kinds, labelOf } from './project.ts';
 import { migrate, planMigration } from './migrate.ts';
-import { FOUNDING, PLAN_FILE, chapterFolderName } from './kinds.ts';
-import { discover, locked, rollback, transactionFiles } from './storage.ts';
+import { decode } from './markdown.ts';
+import { FOUNDING, PLAN_FILE } from './kinds.ts';
+import { discover, locked, readOptional, rollback, transactionFiles } from './storage.ts';
 
 const sourceSchema = Type.Object({ id: Type.String(), revision: Type.String() });
 
+/**
+ * 只有两类事情需要作者手动输入命令：
+ *
+ * 1. **激活**项目 —— 在那之前插件的 skill 不会加载，对话里也表达不了。
+ * 2. **迁移旧格式** —— 破坏性、一次性，而且 format 1 项目里 skill 根本没加载，
+ *    对话路径够不到它。
+ *
+ * 其他所有操作都通过和模型说话完成。需要你本人授权的那几步（采纳、确认、
+ * 退回……）不再要求你输命令 —— 模型会发起请求，你在终端上点一下确认框。
+ */
 const help = `# pi-novel
 
 前端用 Obsidian 读写，Pi 负责生成。所有内容都是普通 Markdown。
 
 /novel init [书名] — 在当前文件夹激活项目（允许非空目录）
-/novel adopt <路径> [--kind 种类] [--title 标题] — 把作者手写的笔记纳入管理
-/novel setup — 引导式立项：文风 → 背景 → 世界观 → 规则 → 大纲
-/novel status — 章节、状态和进度
-/novel new <标题> — 新建章节（同时生成 方案/正文/摘要）
-/novel approve <章节> — 批准本章方案，解锁正文写作
-/novel create <种类> <名称> — 新建设定
-/novel write|polish|review|plan <要求> — 调用内置创作 Skill
-/novel check — 结构、引用、来源版本与立项进度检查
-/novel accept|publish|confirm|reopen <相对路径> — 作者确认状态变更
-/novel reorder <按顺序排列的全部章节 ID> — 重排章节
-/novel history — 事务记录
-/novel recover <事务 ID> — 回滚（遇到外部修改则拒绝）
-/novel export — 导出已采纳章节
 /novel migrate — 把 format 1 旧项目升级到当前格式
-/novel close — 关闭本会话管理保护
+/novel close — 关闭本会话的管理保护
 
-种类：${Object.keys(kinds).join(', ')}
+其余全部直接和模型说就行：
+  「我们立项吧，先定文风」    「新建一章叫雨夜」
+  「按这个方案写」            「这章可以了」（会弹确认框让你点）
+  「加个人物叫林默」          「检查一下」
+  「概要把第三段改冷一点」    「把第 3 章挪到第 2 章前面」
 
-写正文前必须先有方案并被批准。接受正文、确认设定、恢复版本只能由作者执行。`;
+采纳、发布、确认、退回由你点确认框决定，模型无法代替你。`;
 
 export function output(text: string) {
   const t = truncateHead(text, { maxBytes: 40000, maxLines: 1000 });
@@ -47,21 +48,48 @@ export function output(text: string) {
 
 // Guard is deliberately allowlist-based: unknown tool implementations may write via arbitrary APIs.
 export const readOnlyTools = new Set(['read', 'grep', 'find', 'ls']);
+
+export const NOVEL_TOOLS = [
+  // 只读
+  'novel_check', 'novel_catalog', 'novel_read', 'novel_context', 'novel_history',
+  // 写作
+  'novel_create', 'novel_new_chapter', 'novel_propose', 'novel_write',
+  'novel_patch', 'novel_rename', 'novel_summary',
+  // 作者授权（弹确认框）
+  'novel_authorize',
+  // 维护
+  'novel_adopt', 'novel_reorder', 'novel_recover', 'novel_export',
+] as const;
+
 export function allowedTool(name: string): boolean {
-  return readOnlyTools.has(name) || [
-    'novel_catalog', 'novel_read', 'novel_create', 'novel_new_chapter', 'novel_write',
-    'novel_patch', 'novel_rename', 'novel_propose', 'novel_summary', 'novel_context', 'novel_check',
-  ].includes(name);
+  return readOnlyTools.has(name) || (NOVEL_TOOLS as readonly string[]).includes(name);
 }
+
+/** 作者取消时的固定回话，避免模型换个说法反复问。 */
+const DECLINED = '作者取消了这次操作。不要重试，也不要换一种说法再问 —— 等他明确要求。';
 
 export default function novelExtension(pi: ExtensionAPI) {
   let active: Project | undefined;
+
   const need = async (): Promise<Project> => {
-    if (!active) throw new Error('没有打开的小说。先在小说文件夹里 /novel init，或从该目录启动 Pi。');
+    if (!active) throw new Error('没有打开的小说。请在小说文件夹里用 /novel init 激活，或从该目录启动 Pi。');
     await active.validate();
     return active;
   };
+
   const show = (text: string) => pi.sendMessage({ customType: 'pi-novel', content: text, display: true });
+
+  /**
+   * 作者授权闸门。
+   *
+   * 这是本次改造的关键：过去采纳/确认只能是命令，模型连「请求」都做不到；
+   * 现在模型可以发起请求，但**必须由作者在终端上点确认框**才会执行。
+   * 授权仍然只在作者手里，而作者不必再输命令、也不必记住文件路径。
+   */
+  const askAuthor = async (ctx: ExtensionContext, title: string, message: string): Promise<boolean> => {
+    if (!ctx.hasUI) throw new Error('这一步需要作者确认，请在交互模式下操作。');
+    return ctx.ui.confirm(title, message);
+  };
 
   const refresh = async (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
@@ -84,7 +112,10 @@ export default function novelExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     active = undefined;
     const root = await discover(ctx.cwd);
-    if (root) { active = new Project(root); await active.validate(); }
+    // 只看到标记文件就进入受管模式，**即使项目本身有问题**。
+    // 这是刻意的 fail-closed：项目坏了不能成为「任模型自由使用 bash/write/edit」的理由。
+    // 具体问题由 need() 里的 validate() 报出来。
+    if (root) active = new Project(root);
     await refresh(ctx);
   });
 
@@ -105,33 +136,48 @@ export default function novelExtension(pi: ExtensionAPI) {
 
   pi.on('before_agent_start', async event => {
     if (!active) return;
-    await active.validate();
+    try {
+      await active.validate();
+    } catch (error) {
+      // 项目不可用也不要让整轮对话起不来：写入保持封锁，但要把原因告诉模型，
+      // 它才能转告作者该跑 /novel migrate 还是手工修。
+      return {
+        systemPrompt: event.systemPrompt + `
+
+pi-novel found a project marker at ${active.root} but the project is not usable: ${(error as Error).message}
+All file writes stay blocked. Tell the author exactly what is wrong and suggest the fix (usually /novel migrate for a format 1 project). Do not try to repair the files yourself.`,
+      };
+    }
     return {
       systemPrompt: event.systemPrompt + `
 
-pi-novel is managing a Markdown novel whose front end is Obsidian. Load the novel-manager skill before creative work.
+pi-novel is managing a Markdown novel whose front end is Obsidian. The author talks to you in plain language and maintains the Markdown files himself. Load the novel-manager skill before creative work.
+
+You drive the workflow; the author should never need to type a slash command except /novel init, /novel migrate and /novel close.
 
 Workflow that must be respected:
-- Before writing any chapter body, build a chapter plan with novel_propose, and wait for the author to run /novel approve. Writing 正文.md before approval is rejected by the tool.
-- Start the project by settling 文风, 背景, 世界观, 规则, 大纲 with the author, in that order.
+- Before writing any chapter body, build a chapter plan with novel_propose. Writing 正文.md before the author approves the plan is rejected by the tool.
+- Ask the author to approve by calling novel_authorize; that shows a confirmation dialog the author answers. Never claim approval you did not receive.
+- Start a project by settling 文风, 背景, 世界观, 规则, 大纲 with the author, in that order.
 
 Rules:
 - Use novel_catalog / novel_read / novel_context before every change; write with novel_write and the exact revision.
 - All paths are relative to the active project, not necessarily cwd. Do not bypass managed tools.
-- references (refs) and sources use stable document IDs, never paths. Renaming a file in Obsidian must not break anything.
+- refs and sources use stable document IDs, never paths. Renaming a file in Obsidian must not break anything.
 - In prose, link other notes with [[双方括号]] so Obsidian's graph and backlinks work.
-- Draft and planned information is not canon. Never claim author acceptance; author-only /novel commands control acceptance.
+- Draft and planned information is not canon.
+- Never call novel_authorize speculatively. Ask once, when the work is genuinely ready, and accept a refusal without repeating it.
 - No subagents unless the user explicitly requests delegation.`,
     };
   });
 
   pi.on('agent_end', async (_e, ctx) => { await refresh(ctx); });
 
-  // ── 工具 ────────────────────────────────────────────────────────────
+  // ── 只读工具 ────────────────────────────────────────────────────────
 
   pi.registerTool({
     name: 'novel_catalog', label: '小说资料目录',
-    description: 'List/search managed Markdown by literal query across title/body/ID/path; paginated, no full bodies. Read selected files with novel_read. kind optional. Paths are relative to active novel.',
+    description: 'List/search managed Markdown by literal query across title/body/ID/aliases/path; paginated, no full bodies. Read selected files with novel_read. kind optional. Paths are relative to active novel.',
     parameters: Type.Object({
       query: Type.Optional(Type.String()),
       kind: Type.Optional(StringEnum(Object.keys(kinds))),
@@ -190,6 +236,60 @@ Rules:
   });
 
   pi.registerTool({
+    name: 'novel_context', label: '章节上下文清单',
+    description: `Return relevant file paths, not full contents. Founding documents (${FOUNDING.map(f => f.path).join(', ')}) always come first, in that order, because they determine how everything after them is written. Read them with novel_read.`,
+    parameters: Type.Object({ chapterId: Type.String() }),
+    async execute(_id, args) { return output(await (await need()).context(args.chapterId)); },
+  });
+
+  pi.registerTool({
+    name: 'novel_check', label: '检查小说资料',
+    description: 'One-stop status: structural/reference/revision issues, founding progress, per-chapter plan state, and Markdown files the author wrote but that are not under management yet. Deterministic checks only, not semantic plot validation.',
+    parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
+    async execute(_id, args) {
+      const p = await need();
+      const issues = await p.diagnostics();
+      const founding = await p.founding();
+      const unmanaged = await p.unmanaged();
+
+      const chapters = [];
+      for (const chapter of await p.chapters()) {
+        const folder = chapter.path.slice(0, chapter.path.lastIndexOf('/'));
+        const planRaw = await readOptional(p.root, `${folder}/${PLAN_FILE}`);
+        let plan: string = 'missing';
+        if (planRaw !== null) {
+          plan = decode(planRaw).meta.status === 'confirmed' ? 'approved' : 'pending';
+        }
+        chapters.push({ order: chapter.meta.order, title: chapter.meta.title, path: chapter.path, status: chapter.meta.status, plan });
+      }
+
+      const start = args.offset ?? 0;
+      return output(JSON.stringify({
+        total: issues.length,
+        issues: issues.slice(start, start + 100),
+        nextOffset: start + 100 < issues.length ? start + 100 : null,
+        founding: founding.map((f) => ({ path: f.path, label: f.label, state: f.state })),
+        chapters,
+        // 作者手写但还没纳入管理的笔记。对话里说「我写了个东西」时先看这里。
+        unmanaged,
+      }, null, 2));
+    },
+  });
+
+  pi.registerTool({
+    name: 'novel_history', label: '修改历史',
+    description: 'List past transactions (newest last). Each entry can be rolled back with novel_recover. Use this before recovering so you quote the right ID.',
+    parameters: Type.Object({}),
+    async execute() {
+      const p = await need();
+      const files = await transactionFiles(p.root);
+      return output(files.length ? files.join('\n') : '还没有任何修改记录。');
+    },
+  });
+
+  // ── 写作工具 ────────────────────────────────────────────────────────
+
+  pi.registerTool({
     name: 'novel_create', label: '创建小说资料',
     description: `Create a template-backed setting/continuity document. No prose is fabricated. Derived records (summary/state/event/relationship-state/review) require sources. refs and sources take stable document IDs, never paths.
 
@@ -208,7 +308,7 @@ Rules:
 
   pi.registerTool({
     name: 'novel_new_chapter', label: '新建章节',
-    description: 'Create a chapter as three documents: 方案.md / 正文.md / 摘要.md. The plan must be approved by the author with /novel approve before 正文.md can be written.',
+    description: 'Create a chapter as three documents: 方案.md / 正文.md / 摘要.md. The plan must be approved by the author before 正文.md can be written.',
     parameters: Type.Object({ title: Type.String() }),
     async execute(_id, args, signal) {
       const p = await need();
@@ -218,9 +318,9 @@ Rules:
 
   pi.registerTool({
     name: 'novel_propose', label: '追加章节方案',
-    description: `Append one round of a chapter plan as "## 方案 vN". This ONLY appends: it never rewrites existing sections, so the author's 要求 and 批注 sections cannot be overwritten. Appending resets the plan to draft, which withdraws any previous approval.
+    description: `Append one round of a chapter plan as "## 方案 vN". This ONLY appends: it never rewrites existing sections, so the author's 要求 and 批注 sections cannot be overwritten.
 
-Use this only after discussing the plan with the author in conversation and being told to record it.`,
+Use this only after discussing the plan with the author in conversation and being told to record it. After it lands, tell the author and offer to request approval.`,
     parameters: Type.Object({
       chapterId: Type.String(),
       expectedRevision: Type.String(),
@@ -288,73 +388,139 @@ Use this only after discussing the plan with the author in conversation and bein
     },
   });
 
-  pi.registerTool({
-    name: 'novel_context', label: '章节上下文清单',
-    description: `Return relevant file paths, not full contents. Founding documents (${FOUNDING.map(f => f.path).join(', ')}) always come first, in that order, because they determine how everything after them is written. Read them with novel_read.`,
-    parameters: Type.Object({ chapterId: Type.String() }),
-    async execute(_id, args) { return output(await (await need()).context(args.chapterId)); },
-  });
+  // ── 作者授权（唯一能改变受保护状态的入口） ──────────────────────────
+
+  // as const 是必需的：StringEnum 会从数组元素推出字面量联合，
+  // 内联数组会被推成 string[]，于是索引 AUTHORIZE 和 transition 都会失败。
+  const AUTHORIZE_ACTIONS = ['accept', 'publish', 'confirm', 'reopen'] as const;
+  type AuthorizeAction = (typeof AUTHORIZE_ACTIONS)[number];
+
+  const AUTHORIZE: Record<AuthorizeAction, { title: string; why: string }> = {
+    accept: { title: '采纳这一章？', why: '正文会被锁定。之后要改，需要先退回草稿。' },
+    publish: { title: '发布这一章？', why: '标记为已发布（只在本地记录，不上传任何平台）。' },
+    confirm: { title: '确认这份内容？', why: '它会成为长期设定，之后修改需要先退回草稿。' },
+    reopen: { title: '退回草稿？', why: '会解除保护，正文或设定可以重新修改。' },
+  };
 
   pi.registerTool({
-    name: 'novel_check', label: '检查小说资料',
-    description: 'Deterministic structure/reference/revision checks plus founding-progress status. Not semantic plot validation.',
-    parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })) }),
-    async execute(_id, args) {
+    name: 'novel_authorize', label: '请求作者授权',
+    description: `Ask the AUTHOR to approve a protected state change. This is the only way canon changes state, and it always shows a confirmation dialog the author answers — you cannot approve anything yourself.
+
+action:
+- accept  — 采纳章节正文（要求已有绑定当前版本的摘要）
+- publish — 发布已采纳的章节
+- confirm — 确认设定类内容或章节方案
+- reopen  — 退回草稿，解除保护
+
+Call this at most once, only when the work is genuinely ready and the author has indicated so. If the author declines, report that and stop; do not ask again.`,
+    parameters: Type.Object({
+      action: StringEnum(AUTHORIZE_ACTIONS),
+      path: Type.String(),
+    }),
+    async execute(_id, args, signal, _onUpdate, ctx) {
       const p = await need();
-      const issues = await p.diagnostics();
-      const founding = await p.founding();
-      const start = args.offset ?? 0;
-      return output(JSON.stringify({
-        total: issues.length,
-        issues: issues.slice(start, start + 100),
-        nextOffset: start + 100 < issues.length ? start + 100 : null,
-        // 立项进度是提示，不是故障，所以单独给，不混进 issues。
-        founding: founding.map((f) => ({ path: f.path, label: f.label, state: f.state })),
-      }, null, 2));
+      const doc = await p.read(args.path);
+      const intent = AUTHORIZE[args.action];
+      const label = labelOf(doc.meta.kind);
+
+      const approved = await askAuthor(
+        ctx,
+        intent.title,
+        `${doc.meta.title}（${label}）\n${args.path}\n\n${intent.why}\n\n此操作保留可恢复记录。`,
+      );
+      if (!approved) return output(DECLINED);
+
+      const transaction = await mutate(p, signal, () => p.transition(args.path, args.action, doc.revision));
+      return output(JSON.stringify({ ok: true, action: args.action, path: args.path, transaction }));
     },
   });
 
-  // ── 命令 ────────────────────────────────────────────────────────────
+  // ── 维护 ────────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: 'novel_adopt', label: '收编作者的笔记',
+    description: 'Bring a Markdown file the author wrote (no frontmatter yet) under management: add frontmatter, assign a stable ID, and move it into the canonical folder for its kind if it is outside the managed areas. Asks the author to confirm because it rewrites their file.',
+    parameters: Type.Object({
+      path: Type.String(),
+      kind: StringEnum(Object.keys(kinds)),
+      title: Type.Optional(Type.String()),
+    }),
+    async execute(_id, args, signal, _onUpdate, ctx) {
+      const p = await need();
+      const approved = await askAuthor(
+        ctx,
+        '把这个笔记纳入管理？',
+        `${args.path}\n种类：${labelOf(args.kind)}\n\n会补上 frontmatter 并分配编号；如果不在受管目录里，还会移动到规范目录。正文内容不动。`,
+      );
+      if (!approved) return output(DECLINED);
+      return output(JSON.stringify(await mutate(p, signal, () => adoptDocument(p, args.path, args.kind, args.title))));
+    },
+  });
+
+  pi.registerTool({
+    name: 'novel_reorder', label: '调整章节顺序',
+    description: 'Reorder chapters. Provide every chapter ID exactly once, in the desired order (get IDs from novel_check or novel_catalog). Renames chapter folders, so it asks the author to confirm.',
+    parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_id, args, signal, _onUpdate, ctx) {
+      const p = await need();
+      const chapters = await p.chapters();
+      const before = chapters.map((c) => `${c.meta.order}. ${c.meta.title}`).join('\n');
+      const approved = await askAuthor(ctx, '调整章节顺序？', `当前顺序：\n${before}\n\n会重命名章节目录。摘要与状态记录按编号绑定，不会因此过期。`);
+      if (!approved) return output(DECLINED);
+      return output(await mutate(p, signal, () => p.reorder(args.ids)));
+    },
+  });
+
+  pi.registerTool({
+    name: 'novel_recover', label: '撤销一次修改',
+    description: 'Roll back a transaction, restoring every file to its exact previous content. Omit id to roll back the most recent one. Refuses if later or external edits would be clobbered. Asks the author to confirm.',
+    parameters: Type.Object({ id: Type.Optional(Type.String()) }),
+    async execute(_id, args, signal, _onUpdate, ctx) {
+      const p = await need();
+      let id = args.id;
+      if (!id) {
+        const files = await transactionFiles(p.root);
+        const last = files.at(-1);
+        if (!last) throw new Error('还没有任何可撤销的修改。');
+        id = last.slice(last.lastIndexOf('/') + 1).replace(/\.md$/, '');
+      }
+      const approved = await askAuthor(ctx, '撤销这次修改？', `事务 ${id}\n\n所有涉及的文件会恢复到修改前的原文。如果之后又有别的改动，会拒绝执行。`);
+      if (!approved) return output(DECLINED);
+      await mutate(p, signal, () => locked(p.root, () => rollback(p.root, id!)));
+      return output(`已恢复到事务 ${id} 之前的状态。建议再跑一次 novel_check 复核。`);
+    },
+  });
+
+  pi.registerTool({
+    name: 'novel_export', label: '导出已采纳章节',
+    description: 'Concatenate every accepted/published chapter into one Markdown file under 导出/. Refuses if accepted prose changed externally or a summary is stale.',
+    parameters: Type.Object({}),
+    async execute(_id, _args, signal) {
+      const p = await need();
+      return output(JSON.stringify(await mutate(p, signal, () => p.exportBook())));
+    },
+  });
+
+  // ── 命令：只有激活、迁移、关闭 ──────────────────────────────────────
 
   pi.registerCommand('novel', {
-    description: '小说总管：项目、立项、设定、章节、方案批准、创作、审稿、版本恢复',
+    description: '小说项目：激活、迁移旧格式、关闭管理保护',
     getArgumentCompletions(prefix) {
-      return ['init', 'adopt', 'setup', 'status', 'new', 'approve', 'create', 'write', 'polish', 'review', 'plan', 'check', 'accept', 'publish', 'confirm', 'reopen', 'reorder', 'history', 'recover', 'export', 'migrate', 'close', 'help']
-        .filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
+      return ['init', 'migrate', 'close', 'help'].filter(s => s.startsWith(prefix)).map(s => ({ value: s, label: s }));
     },
     async handler(args, ctx) {
       try {
         await ctx.waitForIdle();
         const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(args.trim());
-        let command = match?.[1] ?? 'menu';
-        let rest = match?.[2]?.trim() ?? '';
+        const command = match?.[1] ?? 'help';
+        const rest = match?.[2]?.trim() ?? '';
 
-        if (command === 'menu') {
-          if (!ctx.hasUI) { show(help); return; }
-          const choice = await ctx.ui.select('小说总管', ['status · 进度', 'setup · 立项', 'write · 创作', 'polish · 润色', 'review · 审稿', 'check · 检查', 'help · 帮助']);
-          if (!choice) return;
-          command = choice.split(' ')[0]!;
-        }
-        if (command === 'help') { show(help); return; }
-        if (command === 'close') { active = undefined; await refresh(ctx); show('已关闭小说管理保护。'); return; }
+        if (command === 'help' || command === 'menu') { show(help); return; }
 
-        if (command === 'migrate') {
-          const plan = await planMigration(path.resolve(ctx.cwd));
-          const lines = [
-            `迁移计划（format 1 → 2）`,
-            `书名：${plan.title}`,
-            `需要搬迁：${plan.moves.length} 份文档`,
-            `种类改名：${plan.kindRenames} 处（plan → chapter-plan）`,
-            `来源改绑编号：${plan.sourceRewrites} 份文档`,
-            plan.blockers.length ? `\n⚠ 阻塞项：\n${plan.blockers.map(b => `- ${b}`).join('\n')}` : '\n没有阻塞项。',
-          ];
-          if (plan.blockers.length) { show(lines.join('\n')); return; }
-          if (!ctx.hasUI) throw new Error('迁移需要交互确认，请在 Pi 交互模式使用。');
-          if (!await ctx.ui.confirm('迁移项目格式', '迁移会重写全部文档路径与来源绑定。请确认已经提交或备份整个目录。继续？')) return;
-          const result = await locked(path.resolve(ctx.cwd), () => migrate(path.resolve(ctx.cwd)));
-          active = new Project(result.plan.root);
-          show(`迁移完成，事务 ${result.transaction}。\n如需退回：/novel recover ${result.transaction}\n请运行 /novel check 复核。`);
+        if (command === 'close') {
+          active = undefined;
           await refresh(ctx);
+          show('已关闭小说管理保护。现在可以自由使用其他工具；重新进入小说目录并启动 Pi 会再次激活。');
           return;
         }
 
@@ -363,104 +529,42 @@ Use this only after discussing the plan with the author in conversation and bein
           active = new Project(report.root);
           await active.validate();
           show([
-            `已在 ${report.root} 激活项目。`,
-            report.created.length ? `\n新建：\n${report.created.map(f => `- ${f}`).join('\n')}` : '',
-            report.adopted.length ? `\n沿用已有受管文档：${report.adopted.length} 份` : '',
+            `已在 ${report.root} 激活。`,
+            report.created.length ? `\n已铺好骨架（都是空的，等着填）：\n${report.created.map(f => `- ${f}`).join('\n')}` : '',
             report.unmanaged.length
-              ? `\n发现 ${report.unmanaged.length} 份没有 frontmatter 的笔记，没有自动改动：\n${report.unmanaged.map(f => `- ${f}`).join('\n')}\n要纳入管理请执行：/novel adopt <路径> --kind <种类>`
+              ? `\n发现 ${report.unmanaged.length} 份你自己写的笔记，我没有动它们：\n${report.unmanaged.map(f => `- ${f}`).join('\n')}\n想纳入管理就告诉我，或直接说「把 X 收编成人物」。`
               : '',
-            `\n下一步：/novel setup 开始立项。第一个要定的是文风。`,
+            '\n接下来直接和模型说「我们立项吧」就行。第一个要定的是文风。',
           ].filter(Boolean).join('\n'));
-        } else if (command === 'adopt') {
-          const space = rest.indexOf(' ');
-          const target = space < 0 ? rest : rest.slice(0, space);
-          const flags = space < 0 ? '' : rest.slice(space + 1);
-          if (!target) throw new Error('用法：/novel adopt <路径> --kind <种类> [--title <标题>]');
-          const kindMatch = /--kind\s+(\S+)/.exec(flags);
-          const titleMatch = /--title\s+(.+)$/.exec(flags);
-          if (!kindMatch) throw new Error(`请用 --kind 指定种类。可用：${Object.keys(kinds).join(', ')}`);
-          const p = await need();
-          const result = await mutate(p, undefined, () => adoptDocument(p, target, kindMatch[1]!, titleMatch?.[1]));
-          show(`已纳入管理：${result.path}\n编号：${result.id}\n事务：${result.transaction}`);
-        } else if (command === 'setup') {
-          const p = await need();
-          const skill = await fs.readFile(fileURLToPath(new URL('../skills/novel-manager/SKILL.md', import.meta.url)), 'utf8');
-          const order = FOUNDING.map((f, i) => `${i + 1}. ${f.path}（${labelOf(f.kind)}）`).join('\n');
-          pi.sendUserMessage(`${skill}\n\nSkill directory: ${fileURLToPath(new URL('../skills/novel-manager/', import.meta.url))}\nActive novel root: ${p.root}\nMode: setup\n\n请按照下面的顺序，与作者逐项确定立项内容。每一项都要先提问、给出候选、得到作者明确的答复后才落盘，写完用 novel_write 保存，并提示作者用 /novel confirm 确认。全部完成前不要开始写任何正文。\n\n${order}`);
-        } else if (command === 'approve') {
-          const p = await need();
-          const chapter = await resolveChapter(p, rest);
-          const planPath = await p.planPath(chapter.meta.id);
-          const plan = await p.read(planPath);
-          if (!plan.body.includes('## 方案 v')) throw new Error(`${planPath} 里还没有任何方案内容；让模型先产出方案。`);
-          if (!ctx.hasUI) throw new Error('批准方案需要交互确认，请在 Pi 交互模式使用。');
-          if (!await ctx.ui.confirm('批准本章方案', `${chapter.meta.title}\n${planPath}\n\n批准后正文写作解锁。方案之后若被修改，批准会自动失效。`)) return;
-          show(await mutate(p, undefined, () => p.transition(planPath, 'confirm', plan.revision)));
-          show(`已批准《${chapter.meta.title}》的方案，可以开始写正文了。`);
-        } else if (['write', 'polish', 'review', 'plan'].includes(command)) {
-          if (!rest && ctx.hasUI) rest = (await ctx.ui.input('创作要求', '例如：写下一章；润色指定章节；完善人物关系')) ?? '';
-          if (!rest) return;
-          const p = await need();
-          // Explicitly load the packaged skill even if skill auto-discovery is disabled.
-          const skill = await fs.readFile(fileURLToPath(new URL('../skills/novel-manager/SKILL.md', import.meta.url)), 'utf8');
-          pi.sendUserMessage(`${skill}\n\nSkill directory: ${fileURLToPath(new URL('../skills/novel-manager/', import.meta.url))}\nActive novel root: ${p.root}\nMode: ${command}\nUser request: ${rest}`);
-        } else {
-          const p = await need();
-          if (command === 'status') {
-            const chapters = await p.chapters();
-            const rows = [];
-            for (const d of chapters) {
-              const plan = await p.read(`${d.path.replace(/正文\.md$/, '')}${PLAN_FILE}`).catch(() => undefined);
-              const gate = plan?.meta.status === 'confirmed' ? '方案已批准' : '方案待批准';
-              rows.push(`- ${d.meta.order}. ${d.meta.title} [${d.canonicalChanged ? '外部修改待确认' : d.meta.status}] · ${gate} · ${d.body.replace(/\s/g, '').length} 非空白字符\n  ${d.path}`);
-            }
-            show(`# 小说进度\n\n${p.root}\n\n${rows.join('\n') || '尚无章节。使用 /novel new 标题'}\n\n字数为含标题的非空白字符统计，不等于出版字数。`);
-          } else if (command === 'new') {
-            const result = await mutate(p, undefined, () => p.newChapter(rest));
-            show(`已创建第 ${result.order} 章：${result.folder}\n\n下一步让模型产出方案，然后 /novel approve ${result.id}。`);
-          } else if (command === 'create') {
-            const space = rest.indexOf(' ');
-            if (space < 0) throw new Error('用法：/novel create <种类> <名称>；带来源的记录请通过自然语言创建');
-            show(JSON.stringify(await mutate(p, undefined, () => p.create(rest.slice(0, space), rest.slice(space + 1)))));
-          } else if (command === 'check') {
-            const founding = await p.founding();
-            const labels = { missing: '缺失', empty: '空白', draft: '草稿', confirmed: '已确认' } as const;
-            const progress = founding.map((f) => `- ${f.label}  ${f.path}  ${labels[f.state]}`).join('\n');
-            const issues = await p.diagnostics();
-            show(`# 立项进度（按顺序）\n\n${progress}\n\n# 结构检查\n\n${issues.join('\n') || '结构、引用和来源版本检查通过；这不代表剧情逻辑已经审查。'}`);
-          } else if (['accept', 'publish', 'confirm', 'reopen'].includes(command)) {
-            if (!ctx.hasUI) throw new Error('状态变更需要交互确认，请在 Pi 交互模式使用此命令。');
-            const d = await p.read(rest);
-            if (!await ctx.ui.confirm('确认状态变更', `${command}: ${d.meta.title}\n${rest}\n请先阅读正文。此操作保留可恢复记录。`)) return;
-            show(await mutate(p, undefined, () => p.transition(rest, command as 'accept' | 'publish' | 'confirm' | 'reopen', d.revision)));
-          } else if (command === 'reorder') {
-            if (!ctx.hasUI || !await ctx.ui.confirm('调整章节顺序', '会重命名章节目录。因为来源按编号绑定，摘要不会因此过期。继续？')) return;
-            show(await mutate(p, undefined, () => p.reorder(rest.split(/\s+/))));
-          } else if (command === 'history') show((await transactionFiles(p.root)).join('\n') || '暂无变更记录');
-          else if (command === 'recover') {
-            if (!ctx.hasUI || !await ctx.ui.confirm('恢复旧版本', `回滚事务 ${rest}？有后续或外部修改时将拒绝恢复。`)) return;
-            await mutate(p, undefined, () => locked(p.root, () => rollback(p.root, rest)));
-            show('已恢复。请运行 /novel check。');
-          } else if (command === 'export') show(JSON.stringify(await mutate(p, undefined, () => p.exportBook())));
-          else throw new Error('未知命令；使用 /novel help');
+          await refresh(ctx);
+          return;
         }
-        await refresh(ctx);
+
+        if (command === 'migrate') {
+          const root = path.resolve(ctx.cwd);
+          const plan = await planMigration(root);
+          const lines = [
+            '迁移计划（format 1 → 2）',
+            `书名：${plan.title}`,
+            `需要搬迁：${plan.moves.length} 份文档`,
+            `种类改名：${plan.kindRenames} 处（plan → chapter-plan）`,
+            `来源改绑编号：${plan.sourceRewrites} 份文档`,
+            plan.blockers.length ? `\n阻塞项：\n${plan.blockers.map(b => `- ${b}`).join('\n')}` : '\n没有阻塞项。',
+          ];
+          if (plan.blockers.length) { show(lines.join('\n')); return; }
+          if (!ctx.hasUI) throw new Error('迁移需要交互确认，请在交互模式下使用。');
+          if (!await ctx.ui.confirm('迁移项目格式', '会重写全部文档路径与来源绑定。请确认已经提交或备份整个目录。继续？')) return;
+          const result = await migrate(root);
+          active = new Project(result.plan.root);
+          show(`迁移完成。事务 ${result.transaction}\n如需退回：/novel migrate 之前先用 novel_recover ${result.transaction}\n请再跑一次检查。`);
+          await refresh(ctx);
+          return;
+        }
+
+        show(`未知命令。\n\n${help}`);
       } catch (error) {
         show(`操作未完成：${error instanceof Error ? error.message : String(error)}`);
       }
     },
   });
-}
-
-/** `/novel approve` 接受章节编号或序号。 */
-async function resolveChapter(p: Project, token: string) {
-  if (!token) throw new Error('请提供章节编号或序号，例如 /novel approve 3 或 /novel approve <章节ID>');
-  const chapters = await p.chapters();
-  const byOrder = chapters.find((c) => String(c.meta.order) === token);
-  if (byOrder) return byOrder;
-  const byId = chapters.find((c) => c.meta.id === token);
-  if (byId) return byId;
-  const byFolder = chapters.find((c) => c.path.includes(chapterFolderName(Number(token), '')) || c.path.includes(token));
-  if (byFolder) return byFolder;
-  throw new Error(`找不到章节：${token}`);
 }

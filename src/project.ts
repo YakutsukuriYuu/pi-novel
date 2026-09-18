@@ -264,7 +264,53 @@ export class Project {
   }
 
   async documents(): Promise<Document[]> {
-    return Promise.all((await this.paths()).map((name) => this.read(name)));
+    const out: Document[] = [];
+    for (const name of await this.paths()) {
+      try {
+        out.push(await this.read(name));
+      } catch {
+        // 作者往受管目录里丢了一个没有 frontmatter 的笔记是正常行为，
+        // 不能因此让整次扫描崩掉。这些文件由 unmanaged() 与 diagnostics() 报告。
+      }
+    }
+    return out;
+  }
+
+  /** 项目里所有 Markdown（跳过点目录与 AGENTS.md）。 */
+  async allMarkdown(): Promise<string[]> {
+    const out: string[] = [];
+    const walk = async (prefix: string): Promise<void> => {
+      const dir = prefix ? path.join(this.root, prefix) : this.root;
+      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) { await walk(name); continue; }
+        if (entry.isFile() && name.endsWith('.md') && name !== 'AGENTS.md') out.push(name);
+      }
+    };
+    await walk('');
+    return out.sort();
+  }
+
+  /**
+   * 作者手写、还没纳入管理的 Markdown。
+   *
+   * 对话式流程靠它发现「我写了个东西但忘了登记」。init 报告用的是同一个概念，
+   * 所以这里和 init 的判断必须一致。
+   */
+  async unmanaged(): Promise<string[]> {
+    const managed = new Set<string>();
+    for (const name of await this.paths()) {
+      try {
+        await this.read(name);
+        managed.add(name);
+      } catch {
+        // 解不开的就不是受管文档
+      }
+    }
+    const all = await this.allMarkdown();
+    return all.filter((name) => !managed.has(name));
   }
 
   /** id → 路径。sources/refs 都存 id，读的时候在这里解析。 */
