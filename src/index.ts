@@ -55,7 +55,11 @@ export default function novelExtension(pi: ExtensionAPI) {
   // The package manifest deliberately does not declare skills: novel-manager is injected only when a
   // project root is discoverable, so paper/code sessions never carry its description or trigger on it.
   pi.on('resources_discover', async event => {
-    if (!await discover(event.cwd)) return;
+    const root = await discover(event.cwd);
+    if (!root) return;
+    // Skill injection requires a usable project, not just the marker file. A corrupted
+    // project stays fail-closed (writes blocked, extension error logged) without the skill.
+    try { await new Project(root).validate(); } catch { return; }
     return { skillPaths: [fileURLToPath(new URL('../skills', import.meta.url))] };
   });
   pi.on('before_agent_start', async event => {

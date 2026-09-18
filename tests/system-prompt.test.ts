@@ -62,3 +62,33 @@ test('novel-manager is absent outside a project and present inside one', async t
   // Project-root discovery must reach the same result with or without a project-root cwd.
   assert.equal(prompts.get(novel)!.includes('novel-manager'), prompts.get(path.join(novel, 'chapters'))!.includes('novel-manager'));
 });
+
+test('corrupted project: fail-closed without injecting the skill', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-novel-broken-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const agentDir = path.join(root, 'agent');
+  await fs.mkdir(agentDir);
+  const broken = path.join(root, 'broken');
+  await fs.mkdir(path.join(broken, '.novel'), { recursive: true });
+  await fs.writeFile(path.join(broken, '.novel', 'project.md'), 'not a valid project file\n');
+
+  const loader = new DefaultResourceLoader({
+    cwd: broken,
+    agentDir,
+    settingsManager: SettingsManager.inMemory({ packages: [fileURLToPath(new URL('../', import.meta.url))] }),
+    noContextFiles: true, noPromptTemplates: true, noThemes: true,
+  });
+  await loader.reload();
+  const ext = loader.getExtensions().extensions.find(e => e.path.endsWith('src/index.ts'))!;
+  const ctx = { cwd: broken, hasUI: false } as never;
+  // session_start throws (project corrupt), but the runner continues to resources_discover.
+  await assert.rejects(
+    Promise.all((ext.handlers.get('session_start') ?? []).map(h => h({ type: 'session_start', reason: 'startup' }, ctx))),
+    /frontmatter/,
+  );
+  const offered = await ext.handlers.get('resources_discover')?.[0]?.({ type: 'resources_discover', cwd: broken, reason: 'startup' }, ctx) as { skillPaths?: string[] } | undefined;
+  assert.ok(!offered?.skillPaths?.length, 'broken project must not expose the skill');
+  // Fail-closed: activation marker present, so built-in writes stay blocked despite the error.
+  const blocked = await Promise.all((ext.handlers.get('tool_call') ?? []).map(h => h({ type: 'tool_call', toolName: 'bash', toolCallId: 'x', input: {} }, ctx)));
+  assert.ok(blocked.some(r => (r as { block?: boolean } | undefined)?.block === true), 'writes stay blocked in a corrupted project');
+});
