@@ -1,0 +1,141 @@
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { decode, encode, hash } from './markdown.ts';
+
+export interface Change { path: string; before: string | null; after: string | null }
+const areas = new Set(['setting', 'outline', 'lore', 'chapters', 'continuity', 'workspace', 'reviews', 'exports']);
+export function contentPath(name: string): boolean {
+  return name === 'CREATOR.md' || (areas.has(name.split('/')[0]) && name.endsWith('.md'));
+}
+export async function safePath(root: string, name: string): Promise<string> {
+  if (!name || name.includes('\\') || name.includes('\0') || path.isAbsolute(name) || name.split('/').some(p => !p || p === '.' || p === '..' || /[<>:"|?*\x00-\x1f]/.test(p) || /[. ]$/.test(p) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p))) throw new Error(`Unsafe relative path: ${name}`);
+  let current = root;
+  for (const component of name.split('/')) {
+    current = path.join(current, component);
+    try {
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()) || (stat.isFile() && stat.nlink > 1)) throw new Error(`Unsupported link/special file: ${name}`);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  return current;
+}
+export async function readOptional(root: string, name: string): Promise<string | null> {
+  try { return await fs.readFile(await safePath(root, name), 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+async function atomic(root: string, name: string, text: string | null): Promise<void> {
+  const target = await safePath(root, name);
+  if (text === null) { await fs.unlink(target).catch(error => { if (error.code !== 'ENOENT') throw error; }); return; }
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.md`);
+  try {
+    const handle = await fs.open(temp, 'wx');
+    try { await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
+    await fs.rename(temp, target);
+  } finally { await fs.unlink(temp).catch(() => {}); }
+}
+
+/** Exclusive across cooperating plugin processes. Never steals a possibly-live lock. */
+export async function locked<T>(root: string, work: () => Promise<T>): Promise<T> {
+  const lock = await safePath(root, '.novel/lock');
+  try { await fs.mkdir(lock); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Project locked. Stop other writers; see docs/recovery.md before manually removing .novel/lock.');
+    throw error;
+  }
+  try {
+    await fs.writeFile(path.join(lock, 'owner.md'), `# Active writer\n\nPID: ${process.pid}\nStarted: ${new Date().toISOString()}\n`);
+    return await work();
+  } finally { await fs.rm(lock, { recursive: true }); }
+}
+async function journals(root: string, folder: string): Promise<string[]> {
+  const dir = await safePath(root, folder);
+  try { return (await fs.readdir(dir)).filter(n => !n.startsWith('.') && n.endsWith('.md')).sort().map(n => `${folder}/${n}`); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+}
+export async function transactionFiles(root: string): Promise<string[]> {
+  return [...await journals(root, '.novel/transactions'), ...await pending(root)].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+export async function pending(root: string): Promise<string[]> {
+  // Do not parse years of full-text backups on every keystroke/save.
+  return journals(root, '.novel/pending');
+}
+async function moveJournal(root: string, from: string, to: string): Promise<void> {
+  const target = await safePath(root, to);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.rename(await safePath(root, from), target);
+}
+/** Caller holds the project lock and project mutation queue. Journals retain exact old/new Markdown. */
+export async function commit(root: string, changes: Change[], title: string): Promise<string> {
+  if ((await pending(root)).length) throw new Error('Unfinished transaction: recover it before writing.');
+  if (!changes.length) throw new Error('No changes');
+  const seen = new Set<string>();
+  for (const c of changes) {
+    if (!contentPath(c.path)) throw new Error(`Unmanaged write: ${c.path}`);
+    await safePath(root, c.path);
+    const key = c.path.toLowerCase();
+    if (seen.has(key)) throw new Error('Duplicate transaction path');
+    seen.add(key);
+    if (await readOptional(root, c.path) !== c.before) throw new Error(`Revision conflict: ${c.path}`);
+  }
+  const id = `${Date.now()}-${randomUUID()}`;
+  const journal = `.novel/pending/${id}.md`;
+  const meta = { id, kind: 'transaction', title, status: 'pending', changes };
+  await atomic(root, journal, encode(meta, '# Change transaction\n\nExact Markdown snapshots are stored above. Do not edit this journal.'));
+  // Re-check immediately before each write; partial failure deliberately leaves a recoverable journal.
+  for (const c of changes) {
+    if (await readOptional(root, c.path) !== c.before) throw new Error(`Concurrent edit: ${c.path}; transaction ${id} requires recovery.`);
+    await atomic(root, c.path, c.after);
+  }
+  await atomic(root, journal, encode({ ...meta, status: 'committed' }, '# Committed transaction'));
+  await moveJournal(root, journal, `.novel/transactions/${id}.md`);
+  return id;
+}
+export async function rollback(root: string, id: string): Promise<void> {
+  if (!/^[0-9]+-[a-f0-9-]+$/.test(id)) throw new Error('Invalid transaction ID');
+  const journal = `.novel/pending/${id}.md`;
+  const archived = `.novel/transactions/${id}.md`;
+  if ((await pending(root)).some(p => p !== journal)) throw new Error('Recover the unfinished transaction first');
+  const pendingText = await readOptional(root, journal);
+  const text = pendingText ?? await readOptional(root, archived);
+  if (!text) throw new Error('Transaction not found');
+  const { meta } = decode(text);
+  if (meta.kind !== 'transaction' || meta.id !== id) throw new Error('Invalid transaction identity');
+  if (!['pending', 'committed'].includes(meta.status) && !(pendingText && meta.status === 'rolled-back')) throw new Error('Transaction already recovered');
+  const changes = meta.changes as Change[];
+  if (!Array.isArray(changes) || !changes.length) throw new Error('Invalid transaction');
+  const targets = new Set<string>();
+  for (const c of changes) {
+    if (!c || typeof c.path !== 'string' || !contentPath(c.path) || (c.before !== null && typeof c.before !== 'string') || (c.after !== null && typeof c.after !== 'string')) throw new Error('Invalid transaction target/snapshot');
+    if (targets.has(c.path.toLowerCase())) throw new Error('Duplicate transaction target');
+    targets.add(c.path.toLowerCase());
+    const now = await readOptional(root, c.path);
+    if (meta.status === 'rolled-back' ? now !== c.before : now !== c.after && !(meta.status === 'pending' && now === c.before)) throw new Error(`Recovery conflict: ${c.path}; preserve external edits first.`);
+  }
+  // Move the journal before touching content so interrupted rollback is discoverable.
+  if (!pendingText) await moveJournal(root, archived, journal);
+  // Write-ahead marker makes recovery itself restartable.
+  await atomic(root, journal, encode({ ...meta, status: 'pending' }, '# Recovery in progress'));
+  for (const c of [...changes].reverse()) {
+    const now = await readOptional(root, c.path);
+    if (now !== c.before && now !== c.after) throw new Error(`Recovery conflict: ${c.path}`);
+    await atomic(root, c.path, c.before);
+  }
+  await atomic(root, journal, encode({ ...meta, status: 'rolled-back' }, '# Rolled back'));
+  await moveJournal(root, journal, archived);
+}
+export async function discover(cwd: string): Promise<string | undefined> {
+  let root = await fs.realpath(cwd);
+  for (;;) {
+    if (await readOptional(root, '.novel/project.md') !== null) return root;
+    const parent = path.dirname(root);
+    if (parent === root) return undefined;
+    root = parent;
+  }
+}
+export async function revision(root: string, name: string): Promise<string> {
+  const text = await readOptional(root, name);
+  if (text === null) throw new Error(`Not found: ${name}`);
+  return hash(text);
+}
